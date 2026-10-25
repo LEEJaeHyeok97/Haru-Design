@@ -16,6 +16,11 @@ const DEMO = !CONFIG.SUPABASE_URL || !CONFIG.SUPABASE_ANON_KEY;
 const NEW_SITE = 'https://haru-design-nine.vercel.app';
 const MOVED = !/(\.vercel\.app|^localhost|^127\.0\.0\.1)$/.test(location.hostname);
 
+// 새 기능 공지. 닫으면 이 브라우저에서는 다시 띄우지 않는다.
+const NOTICE_KEY = 'harusolgye-notice-canvas';
+let noticeClosed = false;
+try { noticeClosed = localStorage.getItem(NOTICE_KEY) === '1'; } catch { /* 저장소를 못 쓰면 매번 보여준다 */ }
+
 const TEMPLATE = `## 요구사항 가정\n\n\n## 핵심 구성 요소\n\n\n## 선택한 방식과 이유\n\n\n## 포기한 것\n`;
 
 /* ---------------- small utils ---------------- */
@@ -434,7 +439,9 @@ function renderChrome() {
   const moved = MOVED
     ? `<div class="move-banner" role="status"><strong>사이트 주소가 바뀌었어요</strong><span>문제와 올린 설계는 그대로예요. 닉네임만 새 주소에서 다시 정해 주세요.</span><a class="btn small primary" href="${NEW_SITE}/${location.hash}">새 주소로 가기</a></div>`
     : '';
-  $('#banner').innerHTML = moved + (DEMO
+  const notice = noticeClosed ? ''
+    : `<div class="notice" role="status"><span class="chip">NEW</span><div class="notice-body"><strong>이제 아키텍처를 바로 그릴 수 있어요</strong><span>설계를 올릴 때 이미지를 따로 만들어 첨부하지 않아도 돼요. 작성 창의 캔버스에서 컴포넌트를 추가하고 화살표로 이으면, 올릴 때 그림으로 함께 저장돼요.</span></div><button class="btn ghost small" type="button" data-act="dismiss-notice" aria-label="공지 닫기">✕</button></div>`;
+  $('#banner').innerHTML = moved + notice + (DEMO
     ? `<div class="demo-banner"><strong>데모 모드</strong><span>데이터는 이 브라우저에만 저장돼요. 관리자 페이지는 맨 아래 링크에서 코드 <b class="mono">${esc(CONFIG.DEMO_ADMIN_CODE)}</b>로 들어갈 수 있어요.</span><button class="btn small" type="button" data-act="reset-demo">예시 데이터로 되돌리기</button></div>`
     : '');
 }
@@ -1250,6 +1257,11 @@ document.addEventListener('click', async (ev) => {
   const act = el.dataset.act;
   if (act === 'close-layer') { if (ev.target === el || el.tagName === 'BUTTON' || el.classList.contains('lightbox')) closeLayer(); return; }
   if (act === 'nickname') return openNickname();
+  if (act === 'dismiss-notice') {
+    noticeClosed = true;
+    try { localStorage.setItem(NOTICE_KEY, '1'); } catch { /* 이번 방문 동안만 닫힘 */ }
+    return renderChrome();
+  }
   if (act === 'logout') { await api.signOut(); state.editingTopic = null; await refreshMe(); await openToday(); return toast('관리자에서 로그아웃했어요'); }
   if (act === 'reset-demo') { api.reset(); state.composing = false; state.diagram = dgNew(); state.draft = TEMPLATE; state.draftFile = null; state.draftPreview = null; await refreshMe(); return openToday(); }
   if (act === 'compose') { state.composing = true; render(); $('#post-content')?.focus(); return; }
