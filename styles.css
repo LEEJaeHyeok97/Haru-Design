@@ -450,6 +450,37 @@ button.row:active { background: var(--pressed); }
 .modal .tabs { display: flex; gap: 4px; }
 .modal .actions .btn, .modal > .btn { padding-block: 13px; }
 .err { color: var(--like); font-size: var(--text-sm); margin: 0; }
+/* ---------- 스폰서 칸 ---------- */
+#rail { margin-top: 24px; }
+#rail[hidden] { display: none; }
+.sponsor {
+  display: grid; gap: 6px; padding: 16px; border-radius: 20px; background: var(--surface); box-shadow: var(--shadow);
+  color: inherit; text-decoration: none; transition: transform .15s, box-shadow .15s;
+}
+a.sponsor:hover { box-shadow: var(--shadow-lg); transform: translateY(-1px); }
+.sponsor-label { font-size: .6875rem; font-weight: 600; color: var(--faint); letter-spacing: .02em; }
+.sponsor img { display: block; width: 100%; aspect-ratio: 1.91 / 1; object-fit: cover; border-radius: 12px; background: var(--fill); margin: 2px 0 4px; }
+.sponsor strong { font-size: var(--text-sm); font-weight: 700; line-height: 1.45; color: var(--ink); }
+.sponsor p { margin: 0; font-size: var(--text-xs); line-height: 1.6; color: var(--muted); white-space: pre-line; }
+.sponsor-link { font-size: var(--text-xs); color: var(--marker); font-weight: 600; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sponsor.house { background: var(--sheet); box-shadow: none; border: 1px dashed var(--line); }
+.sponsor.house .btn { justify-self: start; margin-top: 4px; text-decoration: none; }
+@media (min-width: 1200px) {
+  #rail { position: fixed; top: 88px; left: calc(50% + 320px + 32px); width: 240px; margin: 0; }
+}
+
+.sponsor-edit { display: grid; grid-template-columns: 1fr 240px; gap: 24px; align-items: start; }
+.sponsor-edit textarea { min-height: 72px; }
+.sponsor-preview { display: grid; gap: 8px; position: sticky; top: 80px; }
+.sponsor-preview .sub { font-size: var(--text-xs); color: var(--faint); font-weight: 600; }
+.sponsor-preview .sponsor { pointer-events: none; }
+.sp-image-row { display: flex; gap: 6px; align-items: center; }
+.sp-image-row label.btn { cursor: pointer; }
+.sp-active { display: flex; gap: 8px; align-items: center; font-size: var(--text-sm); color: var(--ink-2); }
+.sp-active input { width: 18px; height: 18px; accent-color: var(--marker); }
+.sponsor-rows { margin-top: 20px; }
+@media (max-width: 560px) { .sponsor-edit { grid-template-columns: 1fr; } .sponsor-preview { position: static; } }
+
 .foot-links { padding-top: 48px; text-align: center; display: grid; gap: 6px; justify-items: center; }
 .foot-links .contact { margin: 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 8px; font-size: var(--text-xs); color: var(--faint); }
 .foot-links .contact a { color: var(--muted); text-decoration: none; user-select: all; }
