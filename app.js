@@ -256,6 +256,7 @@ async function createSupabaseApi(onAuthChange) {
     // 관리자 지표 (supabase/2026-10-25-admin-metrics.sql). 기록 실패는 조용히 넘긴다.
     async track(row) { await sb.from('events').insert(row); },
     async adminMetrics(days) { return must(await sb.rpc('admin_metrics', { days })); },
+    async adminTimeline(hours) { return must(await sb.rpc('admin_timeline', { hours })); },
   };
 }
 
@@ -442,6 +443,25 @@ function demoDiagram(content) {
   return { nodes, edges, seq: nodes.length + edges.length };
 }
 
+// supabase/2026-10-25-admin-timeline.sql 의 admin_timeline() 과 같은 모양으로 모은다
+function aggregateTimeline(events, hours) {
+  hours = hours <= 24 ? 24 : hours <= 168 ? 168 : 720;
+  const bucket = { 24: 3600, 168: 21600, 720: 86400 }[hours] * 1000, KST = 9 * 3600000;
+  const floor = (ms) => Math.floor((ms + KST) / bucket) * bucket - KST;
+  const since = floor(Date.now()) - bucket * (hours * 3600000 / bucket - 1);
+  const ev = events.filter((e) => Date.parse(e.created_at) >= since);
+  const map = new Map();
+  for (const e of ev) {
+    const ts = floor(Date.parse(e.created_at)), key = `${ts} ${e.type}`;
+    const r = map.get(key) || { ts, type: e.type, count: 0, errors: 0 };
+    r.count++; if (e.status >= 400) r.errors++;
+    map.set(key, r);
+  }
+  const recent = [...ev].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 200)
+    .map((e) => ({ created_at: e.created_at, type: e.type, path: e.path || '', status: e.status ?? null, duration_ms: e.duration_ms ?? null, visitor: (e.visitor_id || '').slice(0, 6), signed_in: false }));
+  return { hours, bucket_ms: bucket, since, series: [...map.values()].sort((a, b) => a.ts - b.ts), recent };
+}
+
 function createDemoApi() {
   let db;
   try { db = JSON.parse(localStorage.getItem(DEMO_KEY)); } catch { db = null; }
@@ -585,6 +605,7 @@ function createDemoApi() {
       save();
     },
     async adminMetrics(days) { needAdmin(); await wait(); return aggregateMetrics(db.events || [], days); },
+    async adminTimeline(hours) { needAdmin(); await wait(); return aggregateTimeline(db.events || [], hours); },
   };
 }
 
@@ -614,6 +635,7 @@ const state = {
   busy: false,
   review: null,           // AI 평가: { loading } | { result } | { error }
   metrics: null,          // 관리자 지표: { days, data, loading, error }
+  timeline: null,         // 관리자 요청 모니터링: { hours, data, loading, error, only, failOnly }
   subEmail: '',           // 상단 공지에 쓰던 이메일
   subDone: false,         // 방금 구독함 (이번 방문 동안 고마움 표시)
   subscribers: null,      // 관리자: { list, loading, error }
@@ -650,7 +672,7 @@ function go(view, topicId = null) {
   window.scrollTo({ top: 0 });
   render();
   track('view', '/' + view);
-  if (view === 'admin' && state.me?.isAdmin) { loadMetrics(); loadSubscribers(); refreshSponsors().then(() => { const w = $('.sponsor-rows-wrap'); if (w) w.outerHTML = sponsorRowsHtml(); }); }
+  if (view === 'admin' && state.me?.isAdmin) { loadMetrics(); loadTimeline(); loadSubscribers(); refreshSponsors().then(() => { const w = $('.sponsor-rows-wrap'); if (w) w.outerHTML = sponsorRowsHtml(); }); }
 }
 
 async function refreshMe() { state.me = await api.me(); }
@@ -1699,9 +1721,7 @@ function endpointsHtml(endpoints, days) {
     <thead><tr><th>요청</th><th>오늘</th><th>${days}일</th><th>실패</th><th>평균 응답</th></tr></thead>
     <tbody>${endpoints.map((e) => {
       // 스폰서 클릭은 path 에 스폰서 id 가 들어 있어서 제목으로 바꿔 보여준다
-      const sponsor = e.type === 'sponsor_click' && state.sponsors.find((s) => String(s.id) === e.path);
-      const [method, name] = ENDPOINTS[`${e.type} ${e.path}`]
-        || (e.type === 'sponsor_click' ? ['CLICK', `스폰서 · ${sponsor ? sponsor.title : `삭제된 광고 #${e.path}`}`] : ['', `${e.type} ${e.path}`]);
+      const [method, name] = endpointLabel(e.type, e.path);
       return `<tr>
         <td><span class="method">${method}</span>${esc(name)}</td>
         <td class="mono">${fmtNum(e.today)}</td>
@@ -1941,6 +1961,153 @@ function subscribersHtml() {
   return `<section class="panel subscribers">${head}${body}</section>`;
 }
 
+/* ---------- 관리자: 요청 모니터링 (시간대별) ---------- */
+// 요청 종류마다 색이 하나씩 고정이다 (걸러도 다시 칠하지 않는다). 색만으로 구분하지 않도록 범례·툴팁·표에 이름을 함께 쓴다.
+const TL_SERIES = [
+  ['view', '페이지 보기', '#2a78d6'],
+  ['post_create', '설계 올리기', '#eb6834'],
+  ['comment_create', '댓글·답글', '#1baf7a'],
+  ['like', '좋아요', '#eda100'],
+  ['ai_review', 'AI 평가', '#e87ba4'],
+  ['subscribe', '이메일 구독', '#008300'],
+  ['sponsor_click', '스폰서 클릭', '#6250d6'],
+];
+const TL_RANGES = [[24, '24시간'], [168, '7일'], [720, '30일']];
+const kstParts = (ms) => Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(ms)).map((p) => [p.type, p.value]));
+function tlBucketLabel(ms, bucketMs, { long = false } = {}) {
+  const p = kstParts(ms);
+  if (bucketMs >= 86400000) return `${p.month}.${p.day}`;
+  if (bucketMs > 3600000) return long ? `${p.month}.${p.day} ${p.hour}~${String((Number(p.hour) + bucketMs / 3600000) % 24).padStart(2, '0')}시` : `${p.month}.${p.day} ${p.hour}시`;
+  return long ? `${p.month}.${p.day} ${p.hour}:00~${p.hour}:59` : `${p.hour}시`;
+}
+function endpointLabel(type, path) {
+  if (type === 'sponsor_click') {
+    const s = state.sponsors.find((x) => String(x.id) === String(path));
+    return ['CLICK', `스폰서 · ${s ? s.title : `삭제된 광고 #${path}`}`];
+  }
+  return ENDPOINTS[`${type} ${path || ''}`] || ['', `${type} ${path || ''}`.trim()];
+}
+// 서버는 요청이 있던 칸만 주므로 빈 시간대를 0 으로 채운다
+function tlBuckets(d) {
+  const n = Math.round((d.hours * 3600000) / d.bucket_ms);
+  const rows = Array.from({ length: n }, (_, i) => ({ ts: d.since + i * d.bucket_ms, counts: {}, errs: {} }));
+  for (const r of d.series) {
+    const row = rows[Math.round((r.ts - d.since) / d.bucket_ms)];
+    if (!row) continue;
+    row.counts[r.type] = (row.counts[r.type] || 0) + r.count;
+    row.errs[r.type] = (row.errs[r.type] || 0) + r.errors;
+  }
+  return rows;
+}
+function renderTimeline() {
+  const el = $('.timeline');
+  if (el) el.outerHTML = timelineHtml();
+}
+async function loadTimeline(hours = state.timeline?.hours || 24) {
+  state.timeline = { only: null, failOnly: false, ...(state.timeline || {}), hours, loading: true, error: null };
+  renderTimeline();
+  try { state.timeline = { ...state.timeline, data: await api.adminTimeline(hours), loading: false }; }
+  catch (e) {
+    const m = (e && e.message) || '';
+    state.timeline = { ...state.timeline, loading: false, error: /admin_timeline|function|schema cache/i.test(m)
+      ? '요청 모니터링용 DB 설정이 아직 없어요. supabase/2026-10-25-admin-timeline.sql 을 SQL Editor 에서 실행해 주세요.'
+      : friendlyError(e) };
+  }
+  renderTimeline();
+}
+function timelineHtml() {
+  const t = state.timeline || { hours: 24, loading: true };
+  const seg = `<div class="seg" role="group" aria-label="기간">${TL_RANGES.map(([h, label]) => `<button type="button" data-act="tl-hours" data-hours="${h}" aria-pressed="${t.hours === h}">${label}</button>`).join('')}</div>`;
+  const head = `<div class="metrics-head"><h2>요청 모니터링</h2>${seg}<button class="btn ghost small" type="button" data-act="tl-refresh" ${t.loading ? 'disabled' : ''}>${t.loading ? '불러오는 중…' : '새로고침'}</button></div>`;
+  if (t.error) return `<section class="panel timeline">${head}<p class="err" role="alert">${esc(t.error)}</p></section>`;
+  if (!t.data) return `<section class="panel timeline">${head}<p class="loading">불러오는 중…</p></section>`;
+  const d = t.data, rows = tlBuckets(d);
+  const shown = TL_SERIES.filter(([k]) => !t.only || t.only === k);
+  const value = (r) => shown.reduce((sum, [k]) => sum + (r.counts[k] || 0), 0);
+  const fails = (r) => shown.reduce((sum, [k]) => sum + (r.errs[k] || 0), 0);
+  const totals = Object.fromEntries(TL_SERIES.map(([k]) => [k, rows.reduce((sum, r) => sum + (r.counts[k] || 0), 0)]));
+  const total = shown.reduce((sum, [k]) => sum + totals[k], 0);
+  const errors = rows.reduce((sum, r) => sum + fails(r), 0);
+  const peak = rows.reduce((a, r) => (value(r) > value(a) ? r : a), rows[0]);
+  const max = niceMax(Math.max(1, ...rows.map(value)));
+  const H = 180;
+  const step = Math.ceil(rows.length / 8);
+  const legend = `<div class="tl-legend" role="group" aria-label="요청 종류 거르기">${TL_SERIES.map(([k, label, color]) => `
+      <button type="button" class="tl-chip" data-act="tl-only" data-type="${k}" aria-pressed="${t.only === k}" ${t.only && t.only !== k ? 'data-dim' : ''}>
+        <i style="background:${color}"></i>${label}<b class="mono">${fmtNum(totals[k])}</b></button>`).join('')}
+      ${t.only ? '<button type="button" class="btn ghost small" data-act="tl-only" data-type="">전체 보기</button>' : ''}</div>`;
+  const cols = rows.map((r, i) => {
+    let segs = '';
+    for (const [k, , color] of shown) {
+      const n = r.counts[k] || 0;
+      if (n) segs += `<i style="height:${Math.max(3, (n / max) * H)}px;background:${color}"></i>`;
+    }
+    return `<div class="tl-col" tabindex="0" data-i="${i}"><div class="tl-stack">${segs}</div></div>`;
+  }).join('');
+  const logs = d.recent.filter((r) => (!t.only || r.type === t.only) && (!t.failOnly || r.status >= 400)).slice(0, 100);
+  return `
+  <section class="panel timeline ${t.loading ? 'is-loading' : ''}">
+    ${head}
+    <div class="tiles">
+      ${statTile(`${TL_RANGES.find(([h]) => h === d.hours)[1]} 요청`, fmtNum(total), t.only ? TL_SERIES.find(([k]) => k === t.only)[1] : '전체 종류')}
+      ${statTile('실패', fmtNum(errors), total ? `실패율 ${((errors / total) * 100).toFixed(1)}%` : '')}
+      ${statTile('가장 많은 시간대', value(peak) ? tlBucketLabel(peak.ts, d.bucket_ms) : '-', value(peak) ? `${fmtNum(value(peak))}건` : '')}
+    </div>
+    ${legend}
+    <div class="chart tl-chart" role="img" aria-label="${esc(TL_RANGES.find(([h]) => h === d.hours)[1])} 동안 시간대별 요청 수">
+      <div class="chart-y mono" aria-hidden="true"><span>${fmtNum(max)}</span><span>${fmtNum(max / 2)}</span><span>0</span></div>
+      <div class="chart-plot tl-plot" style="height:${H}px">
+        <i class="grid" style="top:0"></i><i class="grid" style="top:50%"></i><i class="grid base" style="top:100%"></i>
+        ${cols}
+        <div class="chart-tip tl-tip" hidden></div>
+      </div>
+      <div class="chart-x mono" aria-hidden="true">${rows.map((r, i) => `<span>${(rows.length - 1 - i) % step === 0 ? tlBucketLabel(r.ts, d.bucket_ms) : ''}</span>`).join('')}</div>
+    </div>
+    <details class="chart-table"><summary>표로 보기</summary>
+      <div class="tl-table-wrap"><table><thead><tr><th>시간대</th>${shown.map(([, label]) => `<th>${label}</th>`).join('')}<th>실패</th></tr></thead>
+      <tbody>${[...rows].reverse().filter((r) => value(r)).map((r) => `<tr><td>${tlBucketLabel(r.ts, d.bucket_ms, { long: true })}</td>${shown.map(([k]) => `<td class="mono">${fmtNum(r.counts[k] || 0)}</td>`).join('')}<td class="mono">${fmtNum(fails(r))}</td></tr>`).join('') || `<tr><td colspan="${shown.length + 2}">이 기간에는 요청이 없어요.</td></tr>`}</tbody></table></div>
+    </details>
+    <div class="tl-log-head"><h3>최근 요청</h3>
+      <label class="tl-fail"><input type="checkbox" data-act="tl-fail" ${t.failOnly ? 'checked' : ''}> 실패만</label></div>
+    ${logs.length ? `<div class="tl-log"><table>
+      <thead><tr><th>시간</th><th>요청</th><th>상태</th><th>응답</th><th>방문자</th></tr></thead>
+      <tbody>${logs.map((r) => {
+        const [method, name] = endpointLabel(r.type, r.path);
+        const p = kstParts(new Date(r.created_at).getTime());
+        const color = (TL_SERIES.find(([k]) => k === r.type) || [])[2] || 'var(--faint)';
+        return `<tr>
+          <td class="mono">${p.month}.${p.day} ${p.hour}:${p.minute}:${p.second}</td>
+          <td><i class="tl-dot" style="background:${color}"></i><span class="method">${method}</span>${esc(name)}</td>
+          <td class="mono">${r.status == null ? '<span class="tl-ok">OK</span>' : r.status >= 400 ? `<span class="ep-err">⚠ ${r.status}</span>` : `<span class="tl-ok">${r.status}</span>`}</td>
+          <td class="mono">${r.duration_ms == null ? '-' : fmtSec(r.duration_ms)}</td>
+          <td class="mono tl-visitor">${esc(r.visitor || '')}${r.signed_in ? ' · 로그인' : ''}</td></tr>`;
+      }).join('')}</tbody></table></div>` : '<p class="hint">조건에 맞는 요청이 없어요.</p>'}
+    <p class="metrics-note">시간은 한국 시간이에요. 최근 요청은 최대 200건 중 조건에 맞는 100건까지 보여요. 상태 OK 는 응답 코드를 따로 남기지 않는 요청이에요.</p>
+  </section>`;
+}
+function showTlTip(col) {
+  const t = state.timeline, d = t?.data;
+  if (!d) return;
+  const r = tlBuckets(d)[Number(col.dataset.i)];
+  const plot = col.parentElement, tip = plot.querySelector('.tl-tip');
+  const shown = TL_SERIES.filter(([k]) => !t.only || t.only === k);
+  const lines = shown.filter(([k]) => r.counts[k]).map(([k, label, color]) => `<span class="tl-tip-row"><i style="background:${color}"></i>${label}<b class="mono">${fmtNum(r.counts[k])}</b></span>`).join('');
+  const sum = shown.reduce((s, [k]) => s + (r.counts[k] || 0), 0);
+  const err = shown.reduce((s, [k]) => s + (r.errs[k] || 0), 0);
+  tip.innerHTML = `<b>${tlBucketLabel(r.ts, d.bucket_ms, { long: true })}</b><span>요청 ${fmtNum(sum)}건${err ? ` · 실패 ${fmtNum(err)}건` : ''}</span>${lines}`;
+  tip.hidden = false;
+  const pr = plot.getBoundingClientRect(), cr = col.getBoundingClientRect(), stack = col.querySelector('.tl-stack').getBoundingClientRect();
+  const x = cr.left - pr.left + cr.width / 2;
+  tip.style.left = `${Math.min(Math.max(x, tip.offsetWidth / 2), pr.width - tip.offsetWidth / 2)}px`;
+  tip.style.top = `${Math.max(tip.offsetHeight, stack.top - pr.top - 8)}px`;
+  plot.querySelectorAll('.tl-col.on').forEach((o) => o.classList.remove('on'));
+  col.classList.add('on');
+}
+function hideTlTip(plot) {
+  plot.querySelector('.tl-tip').hidden = true;
+  plot.querySelectorAll('.tl-col.on').forEach((o) => o.classList.remove('on'));
+}
+
 function viewAdmin() {
   if (!state.me?.isAdmin) {
     return `
@@ -1962,6 +2129,7 @@ function viewAdmin() {
   const rows = [...state.topics].sort((a, b) => b.publish_date.localeCompare(a.publish_date));
   return `
   ${metricsHtml()}
+  ${timelineHtml()}
   ${subscribersHtml()}
   ${sponsorsAdminHtml()}
   <div><h1 class="page-title">문제 관리</h1><p class="page-sub">날짜마다 문제 하나가 그날 0시(한국 시간)에 공개돼요. 미래 날짜로 미리 예약해 둘 수 있어요.</p></div>
@@ -2160,6 +2328,10 @@ document.addEventListener('click', async (ev) => {
   if (act === 'cancel-reply') { delete state.commentDrafts[`r-input-${state.replyTo?.rootId}`]; state.replyTo = null; return render(); }
   if (act === 'metrics-days') return loadMetrics(Number(el.dataset.days));
   if (act === 'metrics-refresh') return loadMetrics();
+  if (act === 'tl-hours') return loadTimeline(Number(el.dataset.hours));
+  if (act === 'tl-refresh') return loadTimeline();
+  if (act === 'tl-only') { state.timeline.only = el.dataset.type && state.timeline.only !== el.dataset.type ? el.dataset.type : null; return renderTimeline(); }
+  if (act === 'tl-fail') { state.timeline.failOnly = el.checked; return renderTimeline(); }
   if (act === 'subscribers-refresh') return loadSubscribers();
   if (act === 'sponsor-click') { track('sponsor_click', String(el.dataset.id)); return; }
   if (act === 'sponsor-edit') {
@@ -2451,10 +2623,13 @@ function hideChartTip(plot) {
   plot.querySelector('.chart-tip').hidden = true;
   plot.querySelectorAll('.col.on').forEach((o) => o.classList.remove('on'));
 }
-document.addEventListener('pointerover', (ev) => { const col = ev.target.closest('.chart .col'); if (col) showChartTip(col); });
-document.addEventListener('pointerout', (ev) => { const plot = ev.target.closest('.chart-plot'); if (plot && !plot.contains(ev.relatedTarget)) hideChartTip(plot); });
-document.addEventListener('focusin', (ev) => { if (ev.target.matches?.('.chart .col')) showChartTip(ev.target); });
-document.addEventListener('focusout', (ev) => { if (ev.target.matches?.('.chart .col')) hideChartTip(ev.target.parentElement); });
+document.addEventListener('pointerover', (ev) => { const col = ev.target.closest('.chart .col'); if (col) showChartTip(col); const tc = ev.target.closest('.tl-col'); if (tc) showTlTip(tc); });
+document.addEventListener('pointerout', (ev) => {
+  const plot = ev.target.closest('.chart-plot');
+  if (plot && !plot.contains(ev.relatedTarget)) (plot.classList.contains('tl-plot') ? hideTlTip : hideChartTip)(plot);
+});
+document.addEventListener('focusin', (ev) => { if (ev.target.matches?.('.chart .col')) showChartTip(ev.target); if (ev.target.matches?.('.tl-col')) showTlTip(ev.target); });
+document.addEventListener('focusout', (ev) => { if (ev.target.matches?.('.chart .col')) hideChartTip(ev.target.parentElement); if (ev.target.matches?.('.tl-col')) hideTlTip(ev.target.parentElement); });
 
 /* ---------- boot ---------- */
 (async function boot() {
