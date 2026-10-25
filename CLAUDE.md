@@ -18,6 +18,7 @@
 - 새 사용자 동작을 지표에 넣으려면 `track(type, path)`를 부르고, `events.type` check 제약(SQL)과 `ENDPOINTS` 라벨(app.js)을 같이 늘린다.
 - 스키마 SQL은 레포에 없다. DB 변경은 `supabase/날짜-이름.sql`로 만들고 사용자에게 SQL Editor에서 실행해 달라고 한다 (Claude가 직접 실행할 수 없음). 컬럼이 아직 없어도 깨지지 않게 조회는 `select('*')` 쪽을 선호.
 - 읽기 확인은 anon key로 REST 조회 가능: `curl "$URL/rest/v1/comments?select=*&limit=1" -H "apikey: $KEY"`. 운영 DB에 쓰기 요청은 보내지 말 것.
+- `api/diagram.js`: 그림 없는 글을 Claude(effort low)로 캔버스 형식 그림(`{nodes, edges}`)으로 바꿔 `posts.ai_diagram`에 저장. service_role 키(`SUPABASE_SERVICE_ROLE_KEY`)로 쓰며, `ai_diagram_status`를 `pending`으로 먼저 바꾼 요청만 Claude를 부른다. 프런트는 `refreshPosts()` 뒤 `drawMissingDiagrams()`가 동시 2개씩 요청하고 `rerenderPost()`로 그림 자리만 바꾼다. 서버의 `TYPES`는 `DG_TYPES`와 맞춰 둘 것.
 - `api/review.js`: Supabase 토큰 확인 후 Claude(`claude-opus-5-5`, effort medium, json_schema 구조화 출력, `fallbacks: "default"`)로 평가. 키는 Vercel 환경 변수 `ANTHROPIC_API_KEY`.
 
 ## 확인 방법

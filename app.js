@@ -156,6 +156,7 @@ async function createSupabaseApi(onAuthChange) {
       }
       return rows.map((r) => ({
         id: r.id, user_id: r.user_id, content: r.content, image_path: r.image_path, image_url: publicUrl(r.image_path), is_sample: !!r.is_sample,
+        ai_diagram: r.ai_diagram || null, ai_diagram_status: r.ai_diagram_status || null,
         created_at: r.created_at, author: r.author || { id: r.user_id, nickname: '알 수 없음' },
         like_count: r.likes?.[0]?.count ?? 0, comment_count: r.comments?.[0]?.count ?? 0, liked: liked.has(r.id),
       }));
@@ -201,6 +202,15 @@ async function createSupabaseApi(onAuthChange) {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw Object.assign(new Error(data.error || 'AI 평가를 받지 못했어요. 잠시 뒤 다시 시도해 주세요.'), { status: r.status });
+      return data;
+    },
+    // 다이어그램 없는 글에 AI 가 그림을 그린다 (/api/diagram). 결과는 서버가 저장하므로 로그인이 필요 없다.
+    // 돌려주는 값: { status: 'done', diagram } | { status: 'pending' | 'failed' | 'skip' }
+    async drawDiagram(postId) {
+      const r = await fetch('/api/diagram', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ postId }) });
+      const data = await r.json().catch(() => ({}));
+      if (r.status === 202 || r.status === 409) return data;
+      if (!r.ok) throw Object.assign(new Error(data.error || '그림을 만들지 못했어요.'), { status: r.status });
       return data;
     },
 
@@ -355,6 +365,40 @@ function aggregateMetrics(events, days) {
   return { days, today, daily, endpoints, range: { visitors: new Set(views.map((e) => e.visitor_id)).size, views: views.length } };
 }
 
+// 데모용 AI 아키텍처: 글에 나온 구성 요소를 찾아 종류별 열에 놓고 흐름대로 잇는다
+const DEMO_WORDS = {
+  client: /클라이언트|사용자|앱/, cdn: /CDN/i, lb: /로드 ?밸런서|LB\b/i, gateway: /게이트웨이/, api: /API|서버/i,
+  worker: /워커|컨슈머/, batch: /배치|스케줄러/, redis: /Redis/i, cache: /캐시/, kafka: /Kafka/i, queue: /큐|Queue|Stream/i,
+  mysql: /MySQL/i, sql: /Postgre|SQL DB|RDB/i, nosql: /NoSQL|Mongo|Dynamo|Cassandra/i, search: /검색|Elastic/i, push: /푸시|FCM|APNs/i,
+};
+function demoDiagram(content) {
+  const found = Object.keys(DEMO_WORDS).filter((t) => DEMO_WORDS[t].test(content));
+  const types = [...new Set(['client', 'api', ...found])];
+  if (types.length < 3) return null;
+  const COL = { edge: 0, compute: 1, memory: 2, queue: 2, external: 3, store: 3 };
+  const rows = {};
+  const nodes = types.map((type, i) => {
+    const t = DG_TYPES.find((x) => x.type === type);
+    let col = COL[t.kind];
+    if (type === 'worker' || type === 'batch') col = 3;
+    if (t.kind === 'store' && (types.includes('worker') || types.includes('batch'))) col = 4;
+    const row = (rows[col] = (rows[col] ?? -1) + 1);
+    return { id: 'n' + (i + 1), type, label: t.name, x: 24 + col * 250, y: 24 + row * 100, dup: false };
+  });
+  const id = (type) => nodes.find((n) => n.type === type)?.id;
+  const by = (kind) => nodes.filter((n) => DG_TYPES.find((x) => x.type === n.type).kind === kind && !['client', 'api'].includes(n.type));
+  const edges = [];
+  const link = (from, to, async = false) => { if (from && to && from !== to) edges.push({ id: 'e' + (edges.length + 1), from, to, async, label: '' }); };
+  const edge = by('edge'), workers = nodes.filter((n) => n.type === 'worker' || n.type === 'batch');
+  let prev = id('client');
+  for (const n of edge) { link(prev, n.id); prev = n.id; }
+  link(prev, id('api'));
+  for (const n of [...by('memory'), ...by('external')]) link(id('api'), n.id);
+  for (const n of by('queue')) { link(id('api'), n.id, true); for (const w of workers) link(n.id, w.id, true); }
+  for (const n of by('store')) link(workers[0]?.id || id('api'), n.id);
+  return { nodes, edges, seq: nodes.length + edges.length };
+}
+
 function createDemoApi() {
   let db;
   try { db = JSON.parse(localStorage.getItem(DEMO_KEY)); } catch { db = null; }
@@ -450,6 +494,19 @@ function createDemoApi() {
     // 댓글을 지우면 달린 답글도 함께 지운다 (Supabase 의 on delete cascade 와 같게)
     async deleteComment(id) { db.comments = db.comments.filter((c) => c.id !== id && c.parent_id !== id); save(); },
     async review() { throw new Error('AI 평가는 데모 모드에서는 쓸 수 없어요.'); },
+    // 데모에서는 Claude 대신 글에 나온 구성 요소 이름으로 간단히 그린다
+    async drawDiagram(postId) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const p = db.posts.find((x) => x.id === postId);
+      if (!p) throw new Error('글을 찾지 못했어요.');
+      if (p.image_url) return { status: 'skip' };
+      if (!p.ai_diagram) {
+        p.ai_diagram = demoDiagram(p.content);
+        p.ai_diagram_status = p.ai_diagram ? 'done' : 'failed';
+        save();
+      }
+      return p.ai_diagram ? { status: 'done', diagram: p.ai_diagram } : { status: 'failed' };
+    },
 
     async track(row) {
       db.events = (db.events || []).concat({ ...row, created_at: new Date().toISOString() }).slice(-3000);
@@ -523,6 +580,52 @@ async function refreshPosts() {
   if (state.topicId == null) { state.posts = []; return; }
   state.posts = await api.listPosts(state.topicId);
   for (const id of state.openComments) state.comments[id] = await api.listComments(id);
+  drawMissingDiagrams();
+}
+
+/* ---------- AI 아키텍처 ---------- */
+// 다이어그램 없이 글만 있는 답안은 백그라운드에서 AI 에게 그림을 부탁하고, 오는 대로 그 글만 다시 그린다.
+// 그림은 서버에 저장되므로 글마다 처음 본 한 사람만 기다리고, 그다음부터는 바로 보인다.
+const aiDraw = { running: new Set(), queue: [], tries: {}, off: false, MAX: 2, RETRY_MS: 15000, TRIES: 5 };
+const needsDiagram = (p) => !p.image_url && !p.ai_diagram && p.ai_diagram_status !== 'failed' && !!meaningful(p.content || '');
+const isDrawing = (p) => needsDiagram(p) && !aiDraw.off && (aiDraw.running.has(p.id) || aiDraw.queue.includes(p.id) || p.ai_diagram_status === 'pending');
+
+function drawMissingDiagrams() {
+  if (aiDraw.off) return;
+  for (const p of state.posts) {
+    if (needsDiagram(p) && !aiDraw.running.has(p.id) && !aiDraw.queue.includes(p.id) && (aiDraw.tries[p.id] || 0) < aiDraw.TRIES) aiDraw.queue.push(p.id);
+  }
+  pumpDiagrams();
+}
+function pumpDiagrams() {
+  while (!aiDraw.off && aiDraw.running.size < aiDraw.MAX && aiDraw.queue.length) drawDiagram(aiDraw.queue.shift());
+}
+async function drawDiagram(id) {
+  aiDraw.running.add(id);
+  aiDraw.tries[id] = (aiDraw.tries[id] || 0) + 1;
+  let retry = false;
+  try {
+    const r = await api.drawDiagram(id);
+    const p = state.posts.find((x) => x.id === id);
+    if (p && r.status === 'done') { p.ai_diagram = r.diagram; p.ai_diagram_status = 'done'; }
+    else if (p && r.status === 'failed') p.ai_diagram_status = 'failed';
+    retry = r.status === 'pending';  // 다른 사람이 그리는 중이면 잠시 뒤 결과를 받으러 다시 온다
+  } catch (e) {
+    // 서버 설정 전(503)이나 DB 변경 전이면 이번 방문 동안은 더 부르지 않는다
+    if (e.status === 503 || e.status === 500 || e.status === 400) aiDraw.off = true;
+    else retry = true;
+  }
+  aiDraw.running.delete(id);
+  if (retry && aiDraw.tries[id] < aiDraw.TRIES) setTimeout(() => { if (state.posts.some((p) => p.id === id)) drawMissingDiagrams(); }, aiDraw.RETRY_MS);
+  else if (retry) { const p = state.posts.find((x) => x.id === id); if (p) p.ai_diagram_status = 'failed'; }
+  rerenderPost(id);
+  pumpDiagrams();
+}
+// 입력 중인 글이나 스크롤이 날아가지 않게 해당 글의 그림 자리만 바꾼다
+function rerenderPost(id) {
+  const slot = document.querySelector(`#post-${CSS.escape(String(id))} .post-fig`);
+  const p = state.posts.find((x) => x.id === id);
+  if (slot && p) slot.outerHTML = postFigHtml(p);
 }
 
 /* ---------- header ---------- */
@@ -1195,9 +1298,7 @@ document.addEventListener('keydown', (ev) => {
 }, true);
 
 /* ---------- PNG로 내보내기 ---------- */
-async function dgExportPng() {
-  const d = state.diagram;
-  if (!d.nodes.length) return null;
+function dgExportSvg(d) {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const n of d.nodes) {
     x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y - 8);
@@ -1221,6 +1322,13 @@ async function dgExportPng() {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" font-family='${DG_FONT}'>
     ${dgDefs()}<rect width="${w}" height="${h}" fill="#ffffff"/>
     <g transform="translate(${pad - x0} ${pad - y0})">${dgSvgBody(d, { forExport: true })}</g>${lg}</svg>`;
+  return { svg, w, h };
+}
+
+async function dgExportPng() {
+  const d = state.diagram;
+  if (!d.nodes.length) return null;
+  const { svg, w, h } = dgExportSvg(d);
   const scale = Math.min(2, 1600 / Math.max(w, h));
   const img = await loadImage('data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg));
   const c = document.createElement('canvas');
@@ -1233,6 +1341,26 @@ async function dgExportPng() {
 }
 
 state.diagram = dgNew();
+
+// 서버에서 온 AI 그림을 캔버스 형식으로 다시 맞춘다 (id·좌표·종류를 믿지 않고 새로 만든다)
+const aiSvgCache = new WeakMap();
+function aiDiagramUrl(raw) {
+  if (aiSvgCache.has(raw)) return aiSvgCache.get(raw);
+  let url = null;
+  const ids = new Map();
+  const nodes = (Array.isArray(raw?.nodes) ? raw.nodes : []).slice(0, 20).map((n, i) => {
+    ids.set(n.id, 'n' + i);
+    const x = { id: 'n' + i, type: DG_TYPES.some((t) => t.type === n.type) ? n.type : 'custom', label: String(n.label ?? '').slice(0, 30), x: Number(n.x) || 0, y: Number(n.y) || 0, dup: !!n.dup };
+    if (x.type === 'custom') x.kind = DG_KIND[n.kind] ? n.kind : 'compute';
+    return x;
+  });
+  const edges = (Array.isArray(raw?.edges) ? raw.edges : []).slice(0, 30)
+    .map((e, i) => ({ id: 'e' + i, from: ids.get(e.from), to: ids.get(e.to), async: !!e.async, label: String(e.label ?? '').slice(0, 30) }))
+    .filter((e) => e.from && e.to);
+  if (nodes.length) url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(dgExportSvg({ nodes, edges }).svg);
+  if (raw && typeof raw === 'object') aiSvgCache.set(raw, url);
+  return url;
+}
 
 /* ---------- posts ---------- */
 function contentHtml(text) {
@@ -1308,6 +1436,18 @@ function commentsHtml(p) {
   return `<div class="comments">${body}${form}</div>`;
 }
 
+// 그림 자리: 직접 올린 그림 > AI 가 그린 그림 > 그리는 중 표시
+function postFigHtml(p) {
+  if (p.image_url) return `<div class="post-fig"><button class="post-img" type="button" data-act="zoom" data-src="${esc(p.image_url)}" aria-label="다이어그램 크게 보기"><img src="${esc(p.image_url)}" alt="${esc(p.author.nickname)}님의 설계 다이어그램" loading="lazy"></button></div>`;
+  const ai = p.ai_diagram && aiDiagramUrl(p.ai_diagram);
+  if (ai) {
+    return `<div class="post-fig"><button class="post-img" type="button" data-act="zoom" data-src="${esc(ai)}" aria-label="AI가 그린 다이어그램 크게 보기"><img src="${esc(ai)}" alt="AI가 글을 보고 그린 설계 다이어그램"></button>
+      <p class="ai-fig-note"><span class="chip ai">AI</span>글을 읽고 AI가 그린 그림이에요. 실제 설계와 다를 수 있어요.</p></div>`;
+  }
+  if (isDrawing(p)) return `<div class="post-fig"><div class="ai-fig-wait" role="status"><span class="spinner" aria-hidden="true"></span>AI가 글을 읽고 아키텍처를 그리고 있어요</div></div>`;
+  return '<div class="post-fig"></div>';
+}
+
 function postHtml(p, rank) {
   const mine = state.me && state.me.id === p.user_id && !p.is_sample;
   const canDelete = state.me && (mine || state.me.isAdmin);
@@ -1322,7 +1462,7 @@ function postHtml(p, rank) {
         ${canDelete ? `<button class="btn ghost small danger" type="button" data-act="del-post" data-id="${p.id}">삭제</button>` : ''}
       </div>
     </div>
-    ${p.image_url ? `<button class="post-img" type="button" data-act="zoom" data-src="${esc(p.image_url)}" aria-label="다이어그램 크게 보기"><img src="${esc(p.image_url)}" alt="${esc(p.author.nickname)}님의 설계 다이어그램" loading="lazy"></button>` : ''}
+    ${postFigHtml(p)}
     <div class="post-body ${long ? 'clamped' : ''}">${contentHtml(p.content)}</div>
     ${long ? `<button class="more" type="button" data-act="expand" data-id="${p.id}">더 보기</button>` : ''}
     <div class="post-foot">
