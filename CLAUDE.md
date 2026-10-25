@@ -14,7 +14,7 @@
 
 ## 백엔드
 
-- Supabase 프로젝트 `kqgxhfdwngmxyrkceprm`. 테이블: `topics`, `posts`, `likes`, `comments`(`parent_id`로 대댓글 한 단계), `profiles`, `events`(이용 기록, insert만 공개). RPC `is_admin`, `admin_metrics(days)`. Storage 버킷 `designs`.
+- Supabase 프로젝트 `kqgxhfdwngmxyrkceprm`. 테이블: `topics`, `posts`, `likes`, `comments`(`parent_id`로 대댓글 한 단계), `profiles`, `events`(이용 기록, insert만 공개), `subscribers`(이메일 구독, insert만 공개·select/delete는 `is_admin()`). RPC `is_admin`, `admin_metrics(days)`. Storage 버킷 `designs`.
 - 새 사용자 동작을 지표에 넣으려면 `track(type, path)`를 부르고, `events.type` check 제약(SQL)과 `ENDPOINTS` 라벨(app.js)을 같이 늘린다.
 - 스키마 SQL은 레포에 없다. DB 변경은 `supabase/날짜-이름.sql`로 만들고 사용자에게 SQL Editor에서 실행해 달라고 한다 (Claude가 직접 실행할 수 없음). 컬럼이 아직 없어도 깨지지 않게 조회는 `select('*')` 쪽을 선호.
 - 읽기 확인은 anon key로 REST 조회 가능: `curl "$URL/rest/v1/comments?select=*&limit=1" -H "apikey: $KEY"`. 운영 DB에 쓰기 요청은 보내지 말 것.

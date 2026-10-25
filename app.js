@@ -16,8 +16,9 @@ const DEMO = !CONFIG.SUPABASE_URL || !CONFIG.SUPABASE_ANON_KEY;
 const NEW_SITE = 'https://haru-design-nine.vercel.app';
 const MOVED = !/(\.vercel\.app|^localhost|^127\.0\.0\.1)$/.test(location.hostname);
 
-// 새 기능 공지. 닫으면 이 브라우저에서는 다시 띄우지 않는다.
-const NOTICE_KEY = 'harusolgye-notice-canvas';
+// 상단 공지: 매일 문제 이메일 구독. 닫거나 구독하면 이 브라우저에서는 다시 띄우지 않는다.
+const NOTICE_KEY = 'harusolgye-notice-subscribe';
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 let noticeClosed = false;
 try { noticeClosed = localStorage.getItem(NOTICE_KEY) === '1'; } catch { /* 저장소를 못 쓰면 매번 보여준다 */ }
 
@@ -213,6 +214,16 @@ async function createSupabaseApi(onAuthChange) {
       if (!r.ok) throw Object.assign(new Error(data.error || '그림을 만들지 못했어요.'), { status: r.status });
       return data;
     },
+
+    // 이메일 구독 (supabase/2026-10-25-subscribers.sql). 남기기는 누구나, 보기·삭제는 관리자만.
+    async subscribe(email) {
+      const { error } = await sb.from('subscribers').insert({ email });
+      if (error?.code === '23505') return { already: true };
+      if (error) throw error;
+      return { already: false };
+    },
+    async listSubscribers() { return must(await sb.from('subscribers').select('*').order('created_at', { ascending: false })); },
+    async deleteSubscriber(id) { must(await sb.from('subscribers').delete().eq('id', id)); },
 
     // 관리자 지표 (supabase/2026-10-25-admin-metrics.sql). 기록 실패는 조용히 넘긴다.
     async track(row) { await sb.from('events').insert(row); },
@@ -508,6 +519,17 @@ function createDemoApi() {
       return p.ai_diagram ? { status: 'done', diagram: p.ai_diagram } : { status: 'failed' };
     },
 
+    async subscribe(email) {
+      await wait();
+      db.subscribers = db.subscribers || [];
+      if (db.subscribers.some((s) => s.email.toLowerCase() === email.toLowerCase())) return { already: true };
+      db.subscribers.push({ id: nextId(), email, created_at: new Date().toISOString() });
+      save();
+      return { already: false };
+    },
+    async listSubscribers() { needAdmin(); await wait(); return [...(db.subscribers || [])].sort((a, b) => b.created_at.localeCompare(a.created_at)); },
+    async deleteSubscriber(id) { needAdmin(); db.subscribers = (db.subscribers || []).filter((s) => s.id !== id); save(); },
+
     async track(row) {
       db.events = (db.events || []).concat({ ...row, created_at: new Date().toISOString() }).slice(-3000);
       save();
@@ -542,6 +564,9 @@ const state = {
   busy: false,
   review: null,           // AI 평가: { loading } | { result } | { error }
   metrics: null,          // 관리자 지표: { days, data, loading, error }
+  subEmail: '',           // 상단 공지에 쓰던 이메일
+  subDone: false,         // 방금 구독함 (이번 방문 동안 고마움 표시)
+  subscribers: null,      // 관리자: { list, loading, error }
 };
 
 /* ---------- 이용 기록 (관리자 지표용) ---------- */
@@ -572,7 +597,7 @@ function go(view, topicId = null) {
   window.scrollTo({ top: 0 });
   render();
   track('view', '/' + view);
-  if (view === 'admin' && state.me?.isAdmin) loadMetrics();
+  if (view === 'admin' && state.me?.isAdmin) { loadMetrics(); loadSubscribers(); }
 }
 
 async function refreshMe() { state.me = await api.me(); }
@@ -643,11 +668,18 @@ function renderChrome() {
   const moved = MOVED
     ? `<div class="move-banner" role="status"><strong>사이트 주소가 바뀌었어요</strong><span>문제와 올린 설계는 그대로예요. 닉네임만 새 주소에서 다시 정해 주세요.</span><a class="btn small primary" href="${NEW_SITE}/${location.hash}">새 주소로 가기</a></div>`
     : '';
-  const notice = noticeClosed ? ''
-    : `<div class="notice" role="status"><span class="chip">NEW</span><div class="notice-body"><strong>이제 아키텍처를 바로 그릴 수 있어요</strong><span>설계를 올릴 때 이미지를 따로 만들어 첨부하지 않아도 돼요. 작성 창의 캔버스에서 컴포넌트를 추가하고 화살표로 이으면, 올릴 때 그림으로 함께 저장돼요.</span></div><button class="btn ghost small" type="button" data-act="dismiss-notice" aria-label="공지 닫기">✕</button></div>`;
+  const notice = state.subDone
+    ? `<div class="notice" role="status"><span class="chip">구독</span><div class="notice-body"><strong>이메일을 남겼어요</strong><span>매일 올라오는 설계 문제를 ${esc(state.subDone)}(으)로 보내 드릴게요.</span></div><button class="btn ghost small" type="button" data-act="dismiss-notice" aria-label="공지 닫기">✕</button></div>`
+    : noticeClosed || state.me?.isAdmin ? ''
+    : `<div class="notice subscribe" role="region" aria-label="이메일 구독"><span class="chip">NEW</span><div class="notice-body"><strong>매일 올라오는 설계 문제를 이메일로 받고 싶다면 이메일을 남겨주세요!</strong>
+        <form class="sub-form" id="sub-form"><input type="email" id="sub-email" required maxlength="254" placeholder="name@example.com" autocomplete="email" aria-label="이메일" value="${esc(state.subEmail)}"><button class="btn small primary" type="submit">받아보기</button></form>
+        <span class="sub-note">문제 발송에만 써요.</span></div><button class="btn ghost small" type="button" data-act="dismiss-notice" aria-label="공지 닫기">✕</button></div>`;
+  // 이메일을 쓰는 중에 화면이 다시 그려져도 입력 위치를 지킨다
+  const typingEmail = document.activeElement?.id === 'sub-email';
   $('#banner').innerHTML = moved + notice + (DEMO
     ? `<div class="demo-banner"><strong>데모 모드</strong><span>데이터는 이 브라우저에만 저장돼요. 관리자 페이지는 맨 아래 링크에서 코드 <b class="mono">${esc(CONFIG.DEMO_ADMIN_CODE)}</b>로 들어갈 수 있어요.</span><button class="btn small" type="button" data-act="reset-demo">예시 데이터로 되돌리기</button></div>`
     : '');
+  if (typingEmail) $('#sub-email')?.focus();
 }
 
 /* ---------- topic sheet ---------- */
@@ -1550,6 +1582,7 @@ const ENDPOINTS = {
   'like on': ['POST', '좋아요'],
   'like off': ['DELETE', '좋아요 취소'],
   'ai_review ': ['POST', '/api/review · AI 평가'],
+  'subscribe ': ['POST', '이메일 구독'],
 };
 const fmtNum = (n) => Number(n || 0).toLocaleString('ko-KR');
 const fmtSec = (ms) => (ms == null ? '-' : `${(ms / 1000).toFixed(1)}초`);
@@ -1651,6 +1684,39 @@ function metricsHtml() {
   </section>`;
 }
 
+/* ---------- 관리자: 이메일 구독자 ---------- */
+function renderSubscribers() {
+  const el = $('.subscribers');
+  if (el) el.outerHTML = subscribersHtml();
+}
+async function loadSubscribers() {
+  state.subscribers = { ...(state.subscribers || {}), loading: true, error: null };
+  renderSubscribers();
+  try { state.subscribers = { list: await api.listSubscribers() }; }
+  catch (e) {
+    const m = (e && e.message) || '';
+    state.subscribers = { error: /subscribers|schema cache|does not exist/i.test(m)
+      ? '구독용 DB 설정이 아직 없어요. supabase/2026-10-25-subscribers.sql 을 SQL Editor 에서 실행해 주세요.'
+      : friendlyError(e) };
+  }
+  renderSubscribers();
+}
+function subscribersHtml() {
+  const s = state.subscribers || { loading: true };
+  const list = s.list || [];
+  const head = `<div class="metrics-head"><h2>이메일 구독자 ${s.list ? `<span class="mono sub-count">${fmtNum(list.length)}명</span>` : ''}</h2>
+    ${list.length ? '<button class="btn ghost small" type="button" data-act="copy-subscribers">주소 모두 복사</button>' : ''}
+    <button class="btn ghost small" type="button" data-act="subscribers-refresh" ${s.loading ? 'disabled' : ''}>${s.loading ? '불러오는 중…' : '새로고침'}</button></div>`;
+  let body;
+  if (s.error) body = `<p class="err" role="alert">${esc(s.error)}</p>`;
+  else if (!s.list) body = '<p class="loading">불러오는 중…</p>';
+  else if (!list.length) body = '<p class="hint">아직 남긴 이메일이 없어요. 상단 공지에서 이메일을 남기면 여기에 보여요.</p>';
+  else body = `<ul class="sub-list">${list.map((x) => `
+      <li><span class="sub-email">${esc(x.email)}</span><time datetime="${esc(x.created_at)}">${fmtDate(kstDate(new Date(x.created_at)))}</time>
+        <button class="btn ghost small danger" type="button" data-act="del-subscriber" data-id="${x.id}">삭제</button></li>`).join('')}</ul>`;
+  return `<section class="panel subscribers">${head}${body}</section>`;
+}
+
 function viewAdmin() {
   if (!state.me?.isAdmin) {
     return `
@@ -1672,6 +1738,7 @@ function viewAdmin() {
   const rows = [...state.topics].sort((a, b) => b.publish_date.localeCompare(a.publish_date));
   return `
   ${metricsHtml()}
+  ${subscribersHtml()}
   <div><h1 class="page-title">문제 관리</h1><p class="page-sub">날짜마다 문제 하나가 그날 0시(한국 시간)에 공개돼요. 미래 날짜로 미리 예약해 둘 수 있어요.</p></div>
   <section class="panel">
     <h2>${e.id ? '문제 수정' : '새 문제 등록'}</h2>
@@ -1855,7 +1922,7 @@ document.addEventListener('click', async (ev) => {
   if (act === 'close-layer') { if (ev.target === el || el.tagName === 'BUTTON' || el.classList.contains('lightbox')) closeLayer(); return; }
   if (act === 'nickname') return openNickname();
   if (act === 'dismiss-notice') {
-    noticeClosed = true;
+    noticeClosed = true; state.subDone = false;
     try { localStorage.setItem(NOTICE_KEY, '1'); } catch { /* 이번 방문 동안만 닫힘 */ }
     return renderChrome();
   }
@@ -1867,6 +1934,19 @@ document.addEventListener('click', async (ev) => {
   if (act === 'cancel-reply') { delete state.commentDrafts[`r-input-${state.replyTo?.rootId}`]; state.replyTo = null; return render(); }
   if (act === 'metrics-days') return loadMetrics(Number(el.dataset.days));
   if (act === 'metrics-refresh') return loadMetrics();
+  if (act === 'subscribers-refresh') return loadSubscribers();
+  if (act === 'copy-subscribers') {
+    const text = (state.subscribers?.list || []).map((x) => x.email).join(', ');
+    try { await navigator.clipboard.writeText(text); toast('이메일 주소를 모두 복사했어요'); }
+    catch { toast('복사하지 못했어요. 목록에서 직접 선택해 주세요.'); }
+    return;
+  }
+  if (act === 'del-subscriber') {
+    if (!confirmed(el)) return;
+    try { await api.deleteSubscriber(Number(el.dataset.id) || el.dataset.id); await loadSubscribers(); toast('구독자를 삭제했어요'); }
+    catch (e) { toast(friendlyError(e)); }
+    return;
+  }
   if (act === 'cancel-compose' || (act === 'backdrop-compose' && ev.target === el)) { if (state.busy) return; state.composing = false; return render(); }
   if (act === 'backdrop-compose') return;
   if (act === 'zoom') return openLightbox(el.dataset.src);
@@ -1926,6 +2006,7 @@ document.addEventListener('keydown', (ev) => {
 document.addEventListener('input', (ev) => {
   if (ev.target.id === 'post-content') state.draft = ev.target.value;
   if (ev.target.id === 'post-nick') state.draftNick = ev.target.value;
+  if (ev.target.id === 'sub-email') state.subEmail = ev.target.value;
   if (ev.target.matches?.('[data-c-input]')) {
     const el = ev.target;
     state.commentDrafts[el.id] = el.value;
@@ -1995,6 +2076,21 @@ document.addEventListener('submit', async (ev) => {
       await refreshTopics(); render();
       toast(wasEdit ? '문제를 수정했어요' : `${fmtDate(payload.publish_date)} 문제를 등록했어요`);
     } catch (e) { toast(friendlyError(e)); }
+    return;
+  }
+  if (form.id === 'sub-form') {
+    ev.preventDefault();
+    const email = $('#sub-email').value.trim();
+    if (!EMAIL_RE.test(email)) return toast('이메일 주소를 확인해 주세요.');
+    const btn = form.querySelector('button'); btn.disabled = true;
+    try {
+      const { already } = await api.subscribe(email);
+      if (!already) track('subscribe');
+      noticeClosed = true; state.subDone = email; state.subEmail = '';
+      try { localStorage.setItem(NOTICE_KEY, '1'); } catch { /* 이번 방문 동안만 닫힘 */ }
+      renderChrome();
+      if (already) toast('이미 남겨 주신 이메일이에요');
+    } catch (e) { btn.disabled = false; toast(friendlyError(e)); }
     return;
   }
   if (form.classList.contains('c-form')) {
