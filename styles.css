@@ -451,7 +451,7 @@ button.row:active { background: var(--pressed); }
 .modal .actions .btn, .modal > .btn { padding-block: 13px; }
 .err { color: var(--like); font-size: var(--text-sm); margin: 0; }
 /* ---------- 스폰서 칸 ---------- */
-#rail { margin-top: 24px; }
+#rail { margin-top: 24px; display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); align-items: start; }
 #rail[hidden] { display: none; }
 .sponsor {
   display: grid; gap: 6px; padding: 16px; border-radius: 20px; background: var(--surface); box-shadow: var(--shadow);
@@ -459,14 +459,23 @@ button.row:active { background: var(--pressed); }
 }
 a.sponsor:hover { box-shadow: var(--shadow-lg); transform: translateY(-1px); }
 .sponsor-label { font-size: .6875rem; font-weight: 600; color: var(--faint); letter-spacing: .02em; }
-.sponsor img { display: block; width: 100%; aspect-ratio: 1.91 / 1; object-fit: cover; border-radius: 12px; background: var(--fill); margin: 2px 0 4px; }
+.sponsor img { display: block; width: 100%; border-radius: 12px; background: var(--fill); margin: 2px 0 4px; }
+.sponsor img.natural { height: auto; max-height: 360px; object-fit: contain; }
+.sponsor img.contain { background: var(--sheet); box-shadow: inset 0 0 0 1px var(--fill); }
+.sponsor-ask { grid-column: 1 / -1; justify-self: end; font-size: var(--text-xs); color: var(--faint); text-decoration: none; padding: 0 4px; }
+.sponsor-ask:hover { color: var(--marker); }
 .sponsor strong { font-size: var(--text-sm); font-weight: 700; line-height: 1.45; color: var(--ink); }
 .sponsor p { margin: 0; font-size: var(--text-xs); line-height: 1.6; color: var(--muted); white-space: pre-line; }
 .sponsor-link { font-size: var(--text-xs); color: var(--marker); font-weight: 600; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sponsor.house { background: var(--sheet); box-shadow: none; border: 1px dashed var(--line); }
 .sponsor.house .btn { justify-self: start; margin-top: 4px; text-decoration: none; }
 @media (min-width: 1200px) {
-  #rail { position: fixed; top: 88px; left: calc(50% + 320px + 32px); width: 240px; margin: 0; }
+  #rail {
+    position: fixed; top: 88px; left: calc(50% + 320px + 32px); width: 240px;
+    grid-template-columns: 1fr; max-height: calc(100vh - 108px); overflow-y: auto; scrollbar-width: none;
+    padding: 4px 6px 12px; margin: -4px 0 0 -6px;
+  }
+  #rail::-webkit-scrollbar { display: none; }
 }
 
 .sponsor-edit { display: grid; grid-template-columns: 1fr 240px; gap: 24px; align-items: start; }
@@ -474,7 +483,24 @@ a.sponsor:hover { box-shadow: var(--shadow-lg); transform: translateY(-1px); }
 .sponsor-preview { display: grid; gap: 8px; position: sticky; top: 80px; }
 .sponsor-preview .sub { font-size: var(--text-xs); color: var(--faint); font-weight: 600; }
 .sponsor-preview .sponsor { pointer-events: none; }
+.sp-image-ctrl { display: grid; gap: 12px; }
 .sp-image-row { display: flex; gap: 6px; align-items: center; }
+.sp-opt { display: grid; grid-template-columns: 64px 1fr; gap: 6px 10px; align-items: center; font-size: var(--text-sm); color: var(--ink-2); }
+.sp-opt > span { font-weight: 600; font-size: var(--text-xs); color: var(--muted); }
+.sp-opt .seg { justify-self: start; flex-wrap: wrap; }
+.sp-focus-opt { align-items: start; }
+.sp-focus-opt small { grid-column: 2; font-size: var(--text-xs); color: var(--faint); }
+.sp-focus { position: relative; justify-self: start; cursor: crosshair; touch-action: none; user-select: none; border-radius: 10px; overflow: hidden; background: var(--fill); line-height: 0; }
+.sp-focus img { display: block; max-width: 100%; max-height: 180px; }
+.sp-focus i {
+  position: absolute; width: 18px; height: 18px; margin: -9px 0 0 -9px; border-radius: 50%;
+  border: 3px solid #fff; background: var(--marker); box-shadow: 0 0 0 1px rgba(0, 0, 0, .25), 0 2px 6px rgba(0, 0, 0, .3); pointer-events: none;
+}
+.sp-tip { margin: 0; font-size: var(--text-xs); color: var(--faint); }
+.sponsor-row { grid-template-columns: auto 1fr auto; }
+.sponsor-row .title .chip { margin-right: 4px; vertical-align: 1px; }
+.sp-order { display: flex; flex-direction: column; gap: 0; }
+.sp-order .btn { padding: 2px 8px; line-height: 1.2; }
 .sp-image-row label.btn { cursor: pointer; }
 .sp-active { display: flex; gap: 8px; align-items: center; font-size: var(--text-sm); color: var(--ink-2); }
 .sp-active input { width: 18px; height: 18px; accent-color: var(--marker); }

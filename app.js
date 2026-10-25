@@ -227,11 +227,11 @@ async function createSupabaseApi(onAuthChange) {
 
     // 스폰서 칸 (supabase/2026-10-25-sponsors.sql). 켜진 것은 누구나, 전체와 등록·수정은 관리자만.
     async listSponsors() {
-      const rows = must(await sb.from('sponsors').select('*').order('created_at', { ascending: false }));
+      const rows = must(await sb.from('sponsors').select('*'));
       return rows.map((r) => ({ ...r, image_url: publicUrl(r.image_path) }));
     },
-    async saveSponsor({ id, title, body, link_url, active, file, removeImage }, prev = null) {
-      const row = { title, body, link_url, active };
+    async saveSponsor({ id, title, body, link_url, active, image_style, sort_order, file, removeImage }, prev = null) {
+      const row = { title, body, link_url, active, image_style, ...(sort_order != null ? { sort_order } : {}) };
       let uploaded = null;
       if (file) {
         const { blob, ext } = await prepareImage(file, { max: 800 });
@@ -245,6 +245,9 @@ async function createSupabaseApi(onAuthChange) {
       if ((uploaded || removeImage) && prev?.image_path && !isExternal(prev.image_path)) await sb.storage.from(CONFIG.BUCKET).remove([prev.image_path]);
     },
     async setSponsorActive(id, active) { must(await sb.from('sponsors').update({ active }).eq('id', id)); },
+    async reorderSponsors(changes) {
+      for (const { id, sort_order } of changes) must(await sb.from('sponsors').update({ sort_order }).eq('id', id));
+    },
     async deleteSponsor(s) {
       must(await sb.from('sponsors').delete().eq('id', s.id));
       if (s.image_path && !isExternal(s.image_path)) await sb.storage.from(CONFIG.BUCKET).remove([s.image_path]);
@@ -550,12 +553,12 @@ function createDemoApi() {
 
     async listSponsors() {
       await wait();
-      return [...(db.sponsors || [])].filter((s) => s.active || db.admin).sort((a, b) => b.created_at.localeCompare(a.created_at));
+      return (db.sponsors || []).filter((s) => s.active || db.admin).map((s) => ({ ...s }));
     },
-    async saveSponsor({ id, title, body, link_url, active, file, removeImage }) {
+    async saveSponsor({ id, title, body, link_url, active, image_style, sort_order, file, removeImage }) {
       needAdmin();
       db.sponsors = db.sponsors || [];
-      const row = { title, body, link_url, active };
+      const row = { title, body, link_url, active, image_style, ...(sort_order != null ? { sort_order } : {}) };
       if (file) { const { blob } = await prepareImage(file, { max: 600, forceCompress: true }); row.image_url = await blobToDataURL(blob); }
       else if (removeImage) row.image_url = null;
       if (id) Object.assign(db.sponsors.find((s) => s.id === id), row);
@@ -563,6 +566,7 @@ function createDemoApi() {
       save();
     },
     async setSponsorActive(id, active) { needAdmin(); db.sponsors.find((s) => s.id === id).active = active; save(); },
+    async reorderSponsors(changes) { needAdmin(); for (const { id, sort_order } of changes) db.sponsors.find((s) => s.id === id).sort_order = sort_order; save(); },
     async deleteSponsor(s) { needAdmin(); db.sponsors = db.sponsors.filter((x) => x.id !== s.id); save(); },
 
     async subscribe(email) {
@@ -613,8 +617,7 @@ const state = {
   subEmail: '',           // 상단 공지에 쓰던 이메일
   subDone: false,         // 방금 구독함 (이번 방문 동안 고마움 표시)
   subscribers: null,      // 관리자: { list, loading, error }
-  sponsors: [],           // 켜진 스폰서 (관리자는 전부)
-  sponsorPick: null,      // 이번 방문에 보여줄 스폰서 id (여러 개면 무작위로 하나)
+  sponsors: [],           // 켜진 스폰서 (관리자는 전부), sort_order 순
   editingSponsor: null,   // 관리자: 수정 중인 스폰서
   sponsorFile: null,      // 관리자: 새로 고른 이미지 { file, url }
 };
@@ -1739,24 +1742,41 @@ function metricsHtml() {
 
 /* ---------- 스폰서 칸 ---------- */
 // 넓은 화면에서는 본문 오른쪽에 붙어 따라오고, 좁은 화면에서는 본문 아래에 놓인다.
-// 켜진 광고가 없으면 광고 문의 안내를 대신 띄운다.
+// 켜진 광고를 관리자가 정한 순서대로 모두 보여주고, 하나도 없으면 광고 문의 안내를 띄운다.
 const CONTACT_EMAIL = 'hazardous10@naver.com';
+const CONTACT_HREF = `mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent('하루설계 스폰서 문의')}`;
 const safeLink = (url) => (/^https?:\/\//i.test(url || '') ? url : '#');
+// 이미지 비율: 원본 비율이 기본이라 잘리지 않는다. 비율을 고르면 꽉 채우기(보일 위치 선택) 또는 전체 보이기.
+const SP_RATIOS = [['auto', '원본 비율'], ['1.91', '가로형'], ['4/3', '4:3'], ['1', '정사각']];
+const SP_FITS = [['cover', '꽉 채우기'], ['contain', '전체 보이기']];
+function spStyle(raw) {
+  const r = raw && typeof raw === 'object' ? raw : {};
+  const pct = (v) => Math.max(0, Math.min(100, Math.round(Number(v ?? 50)))) || 0;
+  return {
+    ratio: SP_RATIOS.some(([k]) => k === r.ratio) ? r.ratio : 'auto',
+    fit: r.fit === 'contain' ? 'contain' : 'cover',
+    x: pct(r.x), y: pct(r.y),
+  };
+}
+function spImgStyle(raw) {
+  const st = spStyle(raw);
+  if (st.ratio === 'auto') return '';
+  return `aspect-ratio:${st.ratio};object-fit:${st.fit};object-position:${st.x}% ${st.y}%`;
+}
+const bySponsorOrder = (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || b.created_at.localeCompare(a.created_at);
 async function refreshSponsors() {
-  try { state.sponsors = await api.listSponsors(); } catch { state.sponsors = []; }
-  const live = state.sponsors.filter((s) => s.active);
-  if (!live.some((s) => s.id === state.sponsorPick)) state.sponsorPick = live.length ? live[Math.floor(Math.random() * live.length)].id : null;
+  try { state.sponsors = (await api.listSponsors()).sort(bySponsorOrder); } catch { state.sponsors = []; }
 }
 function sponsorCardHtml(s, { preview = false } = {}) {
   if (!s) {
     return `<div class="sponsor house"><span class="sponsor-label">스폰서</span>
       <strong>이 자리에 광고를 걸어보세요</strong><p>매일 설계 문제를 푸는 개발자들에게 보여요.</p>
-      <a class="btn small" href="mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent('하루설계 스폰서 문의')}">광고 문의</a></div>`;
+      <a class="btn small" href="${CONTACT_HREF}">광고 문의</a></div>`;
   }
-  const img = s.image_url || s.preview_url;
+  const st = spStyle(s.image_style);
   return `<a class="sponsor" href="${esc(safeLink(s.link_url))}" target="_blank" rel="sponsored noopener" ${preview ? 'tabindex="-1"' : `data-act="sponsor-click" data-id="${s.id}"`}>
     <span class="sponsor-label">스폰서</span>
-    ${img ? `<img src="${esc(img)}" alt="" loading="lazy">` : ''}
+    ${s.image_url ? `<img class="${st.ratio === 'auto' ? 'natural' : st.fit}" src="${esc(s.image_url)}" alt="" loading="lazy" style="${spImgStyle(st)}">` : ''}
     <strong>${esc(s.title)}</strong>${s.body ? `<p>${esc(s.body)}</p>` : ''}
     <span class="sponsor-link">${esc((s.link_url || '').replace(/^https?:\/\/(www\.)?/i, '').split('/')[0])} ↗</span></a>`;
 }
@@ -1765,45 +1785,78 @@ function renderRail() {
   if (!rail) return;
   const show = state.view !== 'admin' && !state.composing;
   rail.hidden = !show;
-  rail.innerHTML = show ? sponsorCardHtml(state.sponsors.find((s) => s.id === state.sponsorPick && s.active)) : '';
+  const live = state.sponsors.filter((s) => s.active);
+  rail.innerHTML = !show ? ''
+    : live.length ? `${live.map((s) => sponsorCardHtml(s)).join('')}<a class="sponsor-ask" href="${CONTACT_HREF}">광고 문의</a>`
+    : sponsorCardHtml(null);
 }
 
 /* ---------- 관리자: 스폰서 ---------- */
+// 수정 중인 광고는 state.editingSponsor 에 두고, 글자 입력은 미리 보기만 다시 그린다
+const spBlank = () => ({ id: null, title: '', body: '', link_url: 'https://', active: true, image_url: null, image_style: spStyle(null) });
+const spEditing = () => state.editingSponsor || (state.editingSponsor = spBlank());
+const spImage = (e) => (state.sponsorFile ? state.sponsorFile.url : e.removeImage ? null : e.image_url);
+function spReadForm() {
+  const e = spEditing();
+  if ($('#sp-title')) Object.assign(e, { title: $('#sp-title').value, body: $('#sp-body').value, link_url: $('#sp-link').value, active: $('#sp-active').checked });
+  return e;
+}
+function spImageCtrlHtml() {
+  const e = spEditing(), img = spImage(e), st = spStyle(e.image_style);
+  const seg = (name, items, cur) => `<div class="seg" role="group">${items.map(([k, label]) => `<button type="button" data-act="sp-style" data-k="${name}" data-v="${k}" aria-pressed="${cur === k}">${label}</button>`).join('')}</div>`;
+  return `<div class="sp-image-ctrl">
+    <div class="sp-image-row">
+      <label class="btn small" for="sp-image">${img ? '이미지 바꾸기' : '이미지 고르기'}</label>
+      <input type="file" id="sp-image" accept="image/*" hidden>
+      ${img ? '<button class="btn ghost small danger" type="button" data-act="sponsor-remove-image">이미지 빼기</button>' : ''}
+    </div>
+    ${img ? `
+      <div class="sp-opt"><span>비율</span>${seg('ratio', SP_RATIOS, st.ratio)}</div>
+      ${st.ratio !== 'auto' ? `<div class="sp-opt"><span>맞춤</span>${seg('fit', SP_FITS, st.fit)}</div>` : ''}
+      ${st.ratio !== 'auto' && st.fit === 'cover' ? `
+        <div class="sp-opt sp-focus-opt"><span>보일 위치</span>
+          <div class="sp-focus" id="sp-focus" title="보이게 할 부분을 누르거나 끌어 주세요"><img src="${esc(img)}" alt="" draggable="false"><i style="left:${st.x}%;top:${st.y}%"></i></div>
+          <small>사진에서 꼭 보여야 할 부분을 누르거나 끌어 주세요.</small></div>` : ''}
+      ${st.ratio !== 'auto' && st.fit === 'contain' ? '<p class="sp-tip">비율에 맞지 않는 부분은 여백으로 남아요.</p>' : ''}
+      ${st.ratio === 'auto' ? '<p class="sp-tip">올린 이미지 비율 그대로 보여요. 너무 길면 높이 360px에서 줄여요.</p>' : ''}` : ''}
+  </div>`;
+}
 function sponsorsAdminHtml() {
-  const e = state.editingSponsor || { id: null, title: '', body: '', link_url: 'https://', active: true, image_url: null };
-  const img = state.sponsorFile ? state.sponsorFile.url : e.removeImage ? null : e.image_url;
+  const e = spEditing();
   return `
   <section class="panel sponsors-admin">
     <h2>스폰서 광고</h2>
-    <p class="hint">켜 둔 광고 중 하나가 방문할 때마다 무작위로 오른쪽 칸에 보여요. 켜진 광고가 없으면 광고 문의 안내가 떠요.</p>
+    <p class="hint">켜 둔 광고가 아래 순서대로 모두 보여요. 켜진 광고가 없으면 광고 문의 안내가 떠요.</p>
     <div class="sponsor-edit">
       <form class="form-grid" id="sponsor-form">
         <div class="field"><label for="sp-title">제목</label><input type="text" id="sp-title" required maxlength="60" placeholder="예: 시스템 설계 면접 스터디 모집" value="${esc(e.title)}"></div>
         <div class="field"><label for="sp-body">설명 <span class="sub">선택, 200자까지</span></label><textarea id="sp-body" maxlength="200" placeholder="한두 줄로 짧게">${esc(e.body || '')}</textarea></div>
         <div class="field"><label for="sp-link">링크</label><input type="text" id="sp-link" required maxlength="500" inputmode="url" placeholder="https://" value="${esc(e.link_url)}"></div>
-        <div class="field"><label>이미지 <span class="sub">선택, 가로로 긴 이미지가 잘 어울려요</span></label>
-          <div class="sp-image-row">
-            <label class="btn small" for="sp-image">${img ? '이미지 바꾸기' : '이미지 고르기'}</label>
-            <input type="file" id="sp-image" accept="image/*" hidden>
-            ${img ? '<button class="btn ghost small danger" type="button" data-act="sponsor-remove-image">이미지 빼기</button>' : ''}
-          </div></div>
+        <div class="field"><label>이미지 <span class="sub">선택</span></label>${spImageCtrlHtml()}</div>
         <label class="sp-active"><input type="checkbox" id="sp-active" ${e.active ? 'checked' : ''}> 바로 보이기</label>
         <div class="actions">
           ${e.id ? '<button class="btn ghost" type="button" data-act="sponsor-cancel">취소</button>' : ''}
           <button class="btn primary" type="submit">${e.id ? '수정 저장' : '광고 등록'}</button>
         </div>
       </form>
-      <div class="sponsor-preview"><span class="sub">미리 보기</span>${sponsorCardHtml({ ...e, title: e.title || '제목', image_url: img }, { preview: true })}</div>
+      <div class="sponsor-preview">${sponsorPreviewHtml()}</div>
     </div>
     ${sponsorRowsHtml()}
   </section>`;
 }
+function sponsorPreviewHtml() {
+  const e = spEditing();
+  return `<span class="sub">미리 보기 · 실제 칸 너비(240px)</span>${sponsorCardHtml({ ...e, title: e.title || '제목', image_url: spImage(e) }, { preview: true })}`;
+}
 function sponsorRowsHtml() {
   const rows = state.sponsors;
-  return `<div class="sponsor-rows-wrap">${rows.length ? `<div class="list sponsor-rows">${rows.map((s) => `
-      <div class="row admin-row">
-        <span class="date">${s.active ? '<span class="chip">보이는 중</span>' : '<span class="chip past">꺼짐</span>'}</span>
-        <span class="title">${esc(s.title)}<small>${esc(s.link_url)}</small></span>
+  return `<div class="sponsor-rows-wrap">${rows.length ? `<div class="list sponsor-rows">${rows.map((s, i) => `
+      <div class="row admin-row sponsor-row">
+        <span class="sp-order">
+          <button class="btn ghost small" type="button" data-act="sponsor-move" data-id="${s.id}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="위로">↑</button>
+          <button class="btn ghost small" type="button" data-act="sponsor-move" data-id="${s.id}" data-dir="1" ${i === rows.length - 1 ? 'disabled' : ''} aria-label="아래로">↓</button>
+        </span>
+        <span class="title">${s.active ? '<span class="chip">보이는 중</span>' : '<span class="chip past">꺼짐</span>'} ${esc(s.title)}<small>${esc(s.link_url)}</small></span>
         <span class="ops">
           <button class="btn small" type="button" data-act="sponsor-toggle" data-id="${s.id}">${s.active ? '끄기' : '켜기'}</button>
           <button class="btn small" type="button" data-act="sponsor-edit" data-id="${s.id}">수정</button>
@@ -1811,18 +1864,44 @@ function sponsorRowsHtml() {
         </span>
       </div>`).join('')}</div>` : ''}</div>`;
 }
-// 입력 중인 값을 지키려고 미리 보기만 다시 그린다
+// 입력 중인 글자를 지키려고 이미지 조절 칸과 미리 보기만 다시 그린다
 function renderSponsorPreview() {
+  spReadForm();
   const box = $('.sponsor-preview');
-  if (!box) return;
-  const e = state.editingSponsor || {};
-  const img = state.sponsorFile ? state.sponsorFile.url : e.removeImage ? null : e.image_url;
-  box.innerHTML = `<span class="sub">미리 보기</span>${sponsorCardHtml({ title: $('#sp-title').value || '제목', body: $('#sp-body').value, link_url: $('#sp-link').value, image_url: img }, { preview: true })}`;
+  if (box) box.innerHTML = sponsorPreviewHtml();
+}
+function renderSponsorImageCtrl() {
+  const c = $('.sp-image-ctrl');
+  if (c) c.outerHTML = spImageCtrlHtml();
+  renderSponsorPreview();
 }
 function resetSponsorForm() {
   if (state.sponsorFile) URL.revokeObjectURL(state.sponsorFile.url);
   state.sponsorFile = null; state.editingSponsor = null;
 }
+// 보일 위치: 원본 썸네일에서 누른 곳을 object-position 으로 쓴다
+const spFocus = { dragging: false };
+function spSetFocus(ev) {
+  const box = $('#sp-focus img');
+  if (!box) return;
+  const r = box.getBoundingClientRect();
+  const e = spEditing();
+  e.image_style = { ...spStyle(e.image_style), x: ((ev.clientX - r.left) / r.width) * 100, y: ((ev.clientY - r.top) / r.height) * 100 };
+  const st = spStyle(e.image_style);
+  e.image_style = st;
+  const dot = $('#sp-focus i');
+  if (dot) { dot.style.left = `${st.x}%`; dot.style.top = `${st.y}%`; }
+  const img = $('.sponsor-preview .sponsor img');
+  if (img) img.style.objectPosition = `${st.x}% ${st.y}%`;
+}
+document.addEventListener('pointerdown', (ev) => {
+  if (!ev.target.closest('#sp-focus')) return;
+  ev.preventDefault();
+  spFocus.dragging = true;
+  spSetFocus(ev);
+});
+document.addEventListener('pointermove', (ev) => { if (spFocus.dragging) spSetFocus(ev); });
+document.addEventListener('pointerup', () => { spFocus.dragging = false; });
 
 /* ---------- 관리자: 이메일 구독자 ---------- */
 function renderSubscribers() {
@@ -2080,14 +2159,33 @@ document.addEventListener('click', async (ev) => {
   if (act === 'sponsor-click') { track('sponsor_click', String(el.dataset.id)); return; }
   if (act === 'sponsor-edit') {
     resetSponsorForm();
-    state.editingSponsor = { ...state.sponsors.find((s) => String(s.id) === el.dataset.id) };
+    const s = state.sponsors.find((x) => String(x.id) === el.dataset.id);
+    state.editingSponsor = { ...s, image_style: spStyle(s.image_style) };
     render(); $('#sp-title')?.focus(); return;
   }
   if (act === 'sponsor-cancel') { resetSponsorForm(); return render(); }
   if (act === 'sponsor-remove-image') {
     if (state.sponsorFile) { URL.revokeObjectURL(state.sponsorFile.url); state.sponsorFile = null; }
-    state.editingSponsor = { ...(state.editingSponsor || { id: null, title: '', body: '', link_url: 'https://', active: true }), title: $('#sp-title').value, body: $('#sp-body').value, link_url: $('#sp-link').value, active: $('#sp-active').checked, removeImage: true };
-    return render();
+    spReadForm().removeImage = true;
+    return renderSponsorImageCtrl();
+  }
+  if (act === 'sp-style') {
+    const e = spEditing();
+    e.image_style = spStyle({ ...e.image_style, [el.dataset.k]: el.dataset.v });
+    return renderSponsorImageCtrl();
+  }
+  if (act === 'sponsor-move') {
+    const list = [...state.sponsors];
+    const i = list.findIndex((x) => String(x.id) === el.dataset.id), j = i + Number(el.dataset.dir);
+    if (i < 0 || j < 0 || j >= list.length) return;
+    [list[i], list[j]] = [list[j], list[i]];
+    const changes = list.map((x, k) => ({ id: x.id, sort_order: k })).filter((c, k) => (list[k].sort_order ?? 0) !== c.sort_order);
+    try {
+      await api.reorderSponsors(changes);
+      await refreshSponsors();
+      const w = $('.sponsor-rows-wrap'); if (w) w.outerHTML = sponsorRowsHtml();
+    } catch (e) { toast(/sort_order|schema cache/i.test(e?.message || '') ? '순서용 DB 설정이 아직 없어요. supabase/2026-10-25-sponsors-layout.sql 을 실행해 주세요.' : friendlyError(e)); }
+    return;
   }
   if (act === 'sponsor-toggle') {
     const s = state.sponsors.find((x) => String(x.id) === el.dataset.id);
@@ -2202,9 +2300,8 @@ document.addEventListener('change', (ev) => {
     if (!file.type.startsWith('image/')) return toast('이미지 파일만 올릴 수 있어요.');
     if (state.sponsorFile) URL.revokeObjectURL(state.sponsorFile.url);
     state.sponsorFile = { file, url: URL.createObjectURL(file) };
-    if (state.editingSponsor) state.editingSponsor.removeImage = false;
-    renderSponsorPreview();
-    const pick = $('label[for="sp-image"]'); if (pick) pick.textContent = '이미지 바꾸기';
+    spReadForm().removeImage = false;
+    renderSponsorImageCtrl();
   }
 });
 document.addEventListener('dragover', (ev) => { const d = ev.target.closest('#drop'); if (d) { ev.preventDefault(); d.classList.add('over'); } });
@@ -2260,9 +2357,12 @@ document.addEventListener('submit', async (ev) => {
   }
   if (form.id === 'sponsor-form') {
     ev.preventDefault();
-    const e = state.editingSponsor || {};
+    const e = spReadForm();
     const payload = {
       id: e.id || null,
+      image_style: spStyle(e.image_style),
+      // 새 광고는 맨 위에 놓는다
+      sort_order: e.id ? null : Math.min(0, ...state.sponsors.map((s) => s.sort_order ?? 0)) - 1,
       title: $('#sp-title').value.trim(),
       body: $('#sp-body').value.trim(),
       link_url: $('#sp-link').value.trim(),
@@ -2281,7 +2381,8 @@ document.addEventListener('submit', async (ev) => {
     } catch (err) {
       btn.disabled = false;
       const m = (err && err.message) || '';
-      toast(/sponsors|schema cache|does not exist/i.test(m) ? '스폰서용 DB 설정이 아직 없어요. supabase/2026-10-25-sponsors.sql 을 실행해 주세요.' : friendlyError(err));
+      toast(/image_style|sort_order/i.test(m) ? '스폰서용 DB 설정이 아직 없어요. supabase/2026-10-25-sponsors-layout.sql 을 실행해 주세요.'
+        : /sponsors|schema cache|does not exist/i.test(m) ? '스폰서용 DB 설정이 아직 없어요. supabase/2026-10-25-sponsors.sql 을 실행해 주세요.' : friendlyError(err));
     }
     return;
   }
