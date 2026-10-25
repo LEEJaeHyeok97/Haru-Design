@@ -531,6 +531,7 @@ const state = {
   openComments: new Set(),
   comments: {},           // postId -> comment[]
   replyTo: null,          // 답글 입력 중인 자리: { postId, rootId, nick }
+  commentDrafts: {},      // 입력 칸 id -> 쓰던 댓글 (다시 그려도 남도록)
   draft: TEMPLATE,
   draftFile: null,
   draftPreview: null,
@@ -1396,6 +1397,26 @@ function likeBtn(p) {
 // 답글 맨 앞의 @닉네임 은 강조해서 보여준다
 const commentText = (s) => esc(s).replace(/^@(\S+)/, '<span class="mention">@$1</span>');
 
+// 댓글 입력 칸: Enter 는 줄바꿈, Ctrl/Cmd+Enter 로 등록. 쓰던 내용은 다시 그려도 남는다.
+const SUBMIT_KEY = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? '⌘' : 'Ctrl';
+function commentFormHtml({ id, postId, parentId = null, placeholder, label, initial = '' }) {
+  const value = state.commentDrafts[id] ?? initial;
+  return `
+    <form class="c-form ${parentId ? 'reply-form' : ''}" data-post="${postId}"${parentId ? ` data-parent="${parentId}"` : ''}>
+      <div class="c-box">
+        <textarea id="${id}" name="c" rows="1" maxlength="1000" placeholder="${esc(placeholder)}" aria-label="${label}" data-c-input>${esc(value)}</textarea>
+        <div class="c-actions">
+          <span class="c-hint">Enter 줄바꿈 · ${SUBMIT_KEY}+Enter 등록</span>
+          <span class="c-count mono" ${value.length < 800 ? 'hidden' : ''}>${value.length}/1000</span>
+          ${parentId ? '<button class="btn small ghost" type="button" data-act="cancel-reply">취소</button>' : ''}
+          <button class="btn small" type="submit">등록</button>
+        </div>
+      </div>
+    </form>`;
+}
+// 내용에 맞춰 높이를 늘린다 (최대 높이를 넘으면 스크롤)
+function fitTextarea(el) { el.style.height = 'auto'; el.style.height = `${el.scrollHeight}px`; }
+
 function commentHtml(p, c, rootId) {
   const reply = c.id !== rootId;
   const canDelete = state.me && (state.me.id === c.user_id || state.me.isAdmin);
@@ -1423,16 +1444,14 @@ function commentsHtml(p) {
     body = roots.map((root) => {
       const replies = list.filter((c) => c.parent_id === root.id);
       const open = r && r.postId === p.id && r.rootId === root.id;
-      const form = open ? `
-        <form class="c-form reply-form" data-post="${p.id}" data-parent="${root.id}">
-          <input type="text" id="r-input-${root.id}" name="c" maxlength="1000" placeholder="${esc(root.author.nickname)}님에게 답글 남기기" aria-label="답글" value="${r.nick ? `@${esc(r.nick)} ` : ''}">
-          <button class="btn small ghost" type="button" data-act="cancel-reply">취소</button>
-          <button class="btn small" type="submit">등록</button>
-        </form>` : '';
+      const form = open ? commentFormHtml({
+        id: `r-input-${root.id}`, postId: p.id, parentId: root.id, label: '답글',
+        placeholder: `${root.author.nickname}님에게 답글 남기기`, initial: r.nick ? `@${r.nick} ` : '',
+      }) : '';
       return `<div class="thread">${commentHtml(p, root, root.id)}${replies.length || open ? `<div class="replies">${replies.map((c) => commentHtml(p, c, root.id)).join('')}${form}</div>` : ''}</div>`;
     }).join('');
   }
-  const form = `<form class="c-form" data-post="${p.id}"><input type="text" id="c-input-${p.id}" name="c" maxlength="1000" placeholder="댓글 남기기" aria-label="댓글"><button class="btn small" type="submit">등록</button></form>`;
+  const form = commentFormHtml({ id: `c-input-${p.id}`, postId: p.id, label: '댓글', placeholder: '댓글 남기기' });
   return `<div class="comments">${body}${form}</div>`;
 }
 
@@ -1695,6 +1714,7 @@ function render() {
   document.body.classList.toggle('composing', !!$('#composer'));
   document.body.classList.toggle('has-fab', !!$('.fab'));
   if ($('#dg-svg')) dgRender();
+  for (const el of main.querySelectorAll('[data-c-input]')) if (el.value.includes('\n') || el.value.length > 40) fitTextarea(el);
   const sheet = $('.compose-sheet');
   if (sheet && sheetTop) sheet.scrollTop = sheetTop;
 }
@@ -1778,9 +1798,10 @@ async function toggleLike(id) {
   catch (e) { p.liked = !on; p.like_count += on ? -1 : 1; render(); toast(friendlyError(e)); }
 }
 
-async function submitComment(postId, text, parentId = null) {
+async function submitComment(postId, text, parentId = null, inputId = null) {
   try {
     await api.addComment(postId, text, parentId);
+    if (inputId) delete state.commentDrafts[inputId];
     track('comment_create', parentId ? 'reply' : 'comment');
     state.comments[postId] = await api.listComments(postId);
     const p = state.posts.find((x) => x.id === postId); if (p) p.comment_count = state.comments[postId].length;
@@ -1791,6 +1812,7 @@ async function submitComment(postId, text, parentId = null) {
 }
 
 function openReply(postId, rootId, nick) {
+  if (state.replyTo) delete state.commentDrafts[`r-input-${state.replyTo.rootId}`];
   state.replyTo = { postId, rootId, nick };
   render();
   const input = $(`#r-input-${rootId}`);
@@ -1842,7 +1864,7 @@ document.addEventListener('click', async (ev) => {
   if (act === 'compose') { state.composing = true; render(); $('#post-content')?.focus(); return; }
   if (act === 'ai-review') return runReview();
   if (act === 'reply') return openReply(Number(el.dataset.post) || el.dataset.post, Number(el.dataset.root) || el.dataset.root, el.dataset.nick);
-  if (act === 'cancel-reply') { state.replyTo = null; return render(); }
+  if (act === 'cancel-reply') { delete state.commentDrafts[`r-input-${state.replyTo?.rootId}`]; state.replyTo = null; return render(); }
   if (act === 'metrics-days') return loadMetrics(Number(el.dataset.days));
   if (act === 'metrics-refresh') return loadMetrics();
   if (act === 'cancel-compose' || (act === 'backdrop-compose' && ev.target === el)) { if (state.busy) return; state.composing = false; return render(); }
@@ -1891,6 +1913,11 @@ document.addEventListener('click', async (ev) => {
 });
 
 document.addEventListener('keydown', (ev) => {
+  // 댓글 칸: Ctrl/Cmd+Enter 로 등록 (한글 조합 중에는 무시)
+  if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey) && !ev.isComposing && ev.target.matches?.('[data-c-input]')) {
+    ev.preventDefault();
+    return ev.target.form.requestSubmit();
+  }
   if (ev.key !== 'Escape') return;
   if ($('#layer').innerHTML) closeLayer();
   else if (state.composing && !state.busy && $('#composer')) { state.composing = false; render(); }
@@ -1899,6 +1926,14 @@ document.addEventListener('keydown', (ev) => {
 document.addEventListener('input', (ev) => {
   if (ev.target.id === 'post-content') state.draft = ev.target.value;
   if (ev.target.id === 'post-nick') state.draftNick = ev.target.value;
+  if (ev.target.matches?.('[data-c-input]')) {
+    const el = ev.target;
+    state.commentDrafts[el.id] = el.value;
+    fitTextarea(el);
+    const count = el.form.querySelector('.c-count');
+    count.textContent = `${el.value.length}/1000`;
+    count.hidden = el.value.length < 800;
+  }
 });
 
 async function attachFile(file) {
@@ -1966,11 +2001,12 @@ document.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const postId = Number(form.dataset.post) || form.dataset.post;
     const parentId = form.dataset.parent ? Number(form.dataset.parent) || form.dataset.parent : null;
-    const input = form.querySelector('input');
-    const text = input.value.trim();
+    const input = form.querySelector('textarea');
+    // 앞뒤 공백과 세 줄 이상 연달아 빈 줄은 정리한다
+    const text = input.value.replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n').trim();
     if (!text || (parentId && /^@\S+$/.test(text))) return;
     input.disabled = true;
-    requireUser(() => submitComment(postId, text, parentId));
+    requireUser(() => submitComment(postId, text, parentId, input.id));
     if (!state.me) input.disabled = false;
     return;
   }
