@@ -187,6 +187,19 @@ async function createSupabaseApi(onAuthChange) {
     },
     async addComment(postId, content) { must(await sb.from('comments').insert({ post_id: postId, content })); },
     async deleteComment(id) { must(await sb.from('comments').delete().eq('id', id)); },
+
+    // AI 평가는 Vercel 서버 함수(/api/review)가 처리한다. 만료된 토큰은 getSession 이 갱신해 준다.
+    async review(payload) {
+      const token = (await sb.auth.getSession()).data.session?.access_token;
+      const r = await fetch('/api/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token || ''}` },
+        body: JSON.stringify(payload),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'AI 평가를 받지 못했어요. 잠시 뒤 다시 시도해 주세요.');
+      return data;
+    },
   };
 }
 
@@ -379,6 +392,7 @@ function createDemoApi() {
       save();
     },
     async deleteComment(id) { db.comments = db.comments.filter((c) => c.id !== id); save(); },
+    async review() { throw new Error('AI 평가는 데모 모드에서는 쓸 수 없어요.'); },
   };
 }
 
@@ -404,6 +418,7 @@ const state = {
   editingTopic: null,
   composing: false,       // 작성 폼 열림 여부
   busy: false,
+  review: null,           // AI 평가: { loading } | { result } | { error }
 };
 
 const publishedTopics = () => state.topics.filter((t) => t.publish_date <= kstDate());
@@ -487,6 +502,7 @@ function composerHtml(topic) {
         <textarea id="post-content" name="content" spellcheck="false">${esc(state.draft)}</textarea>
       </div>
       ${dgShellHtml()}
+      ${reviewHtml()}
       <div class="actions">
         <span class="note">한 문제에 한 번 올릴 수 있어요</span>
         <button class="btn ghost" type="button" data-act="cancel-compose" ${state.busy ? 'disabled' : ''}>닫기</button>
@@ -497,24 +513,88 @@ function composerHtml(topic) {
   </div>`;
 }
 
+/* ---------- AI 평가 ---------- */
+function reviewHtml() {
+  const r = state.review;
+  const loading = !!r?.loading;
+  const head = `
+    <div class="ai-head">
+      <div class="ai-title"><b>AI 평가</b><span>올리기 전에 점수와 피드백을 받아볼 수 있어요. 결과는 나에게만 보여요.</span></div>
+      <button class="btn small" type="button" data-act="ai-review" ${loading || state.busy ? 'disabled' : ''}>${loading ? '평가하는 중…' : r?.result ? '다시 평가받기' : 'AI 평가 받기'}</button>
+    </div>`;
+  let body = '';
+  if (loading) body = '<p class="ai-wait">글과 다이어그램을 읽고 있어요. 보통 20~40초 걸려요.</p>';
+  else if (r?.error) body = `<p class="err" role="alert">${esc(r.error)}</p>`;
+  else if (r?.result) {
+    const x = r.result;
+    const list = (items) => `<ul>${items.map((s) => `<li>${esc(s)}</li>`).join('')}</ul>`;
+    body = `
+      <div class="ai-score"><b class="mono">${x.score}</b><span>/ 100</span><p>${esc(x.summary)}</p></div>
+      <div class="ai-criteria">${x.criteria.map((c) => `
+        <div class="ai-crit">
+          <div class="ai-crit-head"><span>${esc(c.name)}</span><b class="mono">${c.score}<small>/10</small></b></div>
+          <div class="ai-bar" aria-hidden="true"><i style="width:${c.score * 10}%"></i></div>
+          <p>${esc(c.comment)}</p>
+        </div>`).join('')}</div>
+      ${x.strengths.length ? `<div class="ai-list good"><h4>잘한 점</h4>${list(x.strengths)}</div>` : ''}
+      ${x.improvements.length ? `<div class="ai-list fix"><h4>더 좋아질 수 있는 점</h4>${list(x.improvements)}</div>` : ''}`;
+  }
+  return `<section class="ai-review" aria-live="polite">${head}${body}</section>`;
+}
+
+async function runReview() {
+  const topic = currentTopic();
+  if (!topic || state.review?.loading) return;
+  state.draft = $('#post-content')?.value ?? state.draft;
+  const content = state.draft.trim();
+  if (!meaningful(content)) return toast('설계 내용을 한 줄 이상 적은 뒤 평가받을 수 있어요.');
+  const nickname = $('#post-nick')?.value.trim().slice(0, 20);
+  if (!state.me && !nickname) { $('#post-nick')?.focus(); return toast('닉네임을 먼저 입력해 주세요.'); }
+  state.review = { loading: true }; render();
+  try {
+    if (!state.me) { await api.ensureUser(nickname); await refreshMe(); }
+    const file = state.dgMode === 'image' ? state.draftFile : await dgExportPng();
+    let image = null;
+    if (file) { const { blob } = await prepareImage(file, { max: 1400 }); image = await blobToDataURL(blob); }
+    const result = await api.review({ topic: { title: topic.title, description: topic.description }, content, image });
+    state.review = { result };
+  } catch (e) { state.review = { error: friendlyError(e) }; }
+  render();
+}
+
 /* =====================================================================
    설계 캔버스: 컴포넌트 카드를 추가하고, 끌어 옮기고, 화살표로 잇는다.
    다 그린 그림은 올릴 때 PNG로 바뀌어 기존 이미지 첨부 자리에 들어간다.
    ===================================================================== */
 const DG_TYPES = [
   { type: 'client', name: '클라이언트', kind: 'edge' },
-  { type: 'lb', name: '로드 밸런서', kind: 'edge' },
+  { type: 'dns', name: 'DNS', kind: 'edge' },
   { type: 'cdn', name: 'CDN', kind: 'edge' },
+  { type: 'lb', name: '로드 밸런서', kind: 'edge' },
+  { type: 'gateway', name: 'API 게이트웨이', kind: 'edge' },
   { type: 'api', name: 'API 서버', kind: 'compute' },
+  { type: 'auth', name: '인증 서버', kind: 'compute' },
+  { type: 'ws', name: 'WebSocket 서버', kind: 'compute' },
   { type: 'worker', name: '워커', kind: 'compute' },
+  { type: 'batch', name: '배치/스케줄러', kind: 'compute' },
+  { type: 'redis', name: 'Redis', kind: 'memory' },
   { type: 'cache', name: '분산 캐시', kind: 'memory' },
+  { type: 'local', name: '로컬 캐시', kind: 'memory' },
+  { type: 'mysql', name: 'MySQL', kind: 'store' },
   { type: 'sql', name: 'SQL DB', kind: 'store' },
+  { type: 'replica', name: '읽기 복제본', kind: 'store' },
   { type: 'nosql', name: 'NoSQL', kind: 'store' },
   { type: 'blob', name: 'Blob Store', kind: 'store' },
   { type: 'search', name: '검색 엔진', kind: 'store' },
+  { type: 'dw', name: '데이터 웨어하우스', kind: 'store' },
+  { type: 'kafka', name: 'Kafka', kind: 'queue' },
   { type: 'queue', name: '메시지 큐', kind: 'queue' },
   { type: 'ext', name: '외부 API', kind: 'external' },
+  { type: 'push', name: '푸시 알림', kind: 'external' },
+  { type: 'monitor', name: '모니터링', kind: 'external' },
 ];
+// 직접 추가한 카드는 type 'custom' 에 종류(kind)를 따로 들고 있다
+const DG_KIND_LABEL = { edge: '진입점', compute: '서버', memory: '캐시', store: '저장소', queue: '큐', external: '외부' };
 const DG_KIND = {
   edge:     { fill: '#e8f8f0', stroke: '#03965a', chip: '#03b26c' },
   compute:  { fill: '#ffffff', stroke: '#333d4b', chip: '#4e5968' },
@@ -526,9 +606,43 @@ const DG_KIND = {
 const DG = { NODE_H: 58, MIN_W: 124, MAX_W: 220, GRID: 8, H_WIDE: 440, H_NARROW: 380, BLUE: '#3182f6', INK: '#191f28', MUTED: '#6b7684' };
 const DG_FONT = '"Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif';
 
-const dgType = (t) => DG_TYPES.find((x) => x.type === t) || DG_TYPES[3];
+const dgType = (t) => DG_TYPES.find((x) => x.type === t) || DG_TYPES.find((x) => x.type === 'api');
+const dgNodeType = (n) => (n.type === 'custom'
+  ? { type: 'custom', name: DG_KIND_LABEL[n.kind] || DG_KIND_LABEL.compute, kind: DG_KIND[n.kind] ? n.kind : 'compute' }
+  : dgType(n.type));
 const dgNew = () => ({ nodes: [], edges: [], seq: 0 });
-const dgView = { w: 600, h: DG.H_WIDE, sel: null, connectFrom: null, drag: null, ro: null };
+const dgView = { w: 600, h: DG.H_WIDE, sel: null, connectFrom: null, drag: null, ro: null, customOpen: false, customKind: 'compute', customName: '', typing: null };
+
+/* ---------- 되돌리기 / 다시 하기 ---------- */
+const dgHist = { past: [], future: [] };
+const dgSnapshot = () => JSON.stringify(state.diagram);
+function dgRecord(snap = dgSnapshot()) {
+  dgHist.past.push(snap);
+  if (dgHist.past.length > 100) dgHist.past.shift();
+  dgHist.future = [];
+}
+// 그림을 바꾸는 동작을 감싸서, 실제로 바뀌었을 때만 되돌리기 한 단계로 남긴다
+function dgMutate(fn) {
+  const before = dgSnapshot();
+  const out = fn();
+  if (dgSnapshot() !== before) dgRecord(before);
+  return out;
+}
+function dgStep(from, to) {
+  if (!from.length) return;
+  to.push(dgSnapshot());
+  state.diagram = JSON.parse(from.pop());
+  dgView.sel = null; dgView.connectFrom = null;
+  dgRender();
+}
+const dgUndo = () => dgStep(dgHist.past, dgHist.future);
+const dgRedo = () => dgStep(dgHist.future, dgHist.past);
+function dgResetHistory() { dgHist.past = []; dgHist.future = []; }
+function dgRenderHistory() {
+  const u = $('[data-dg-act="undo"]'), r = $('[data-dg-act="redo"]');
+  if (u) u.disabled = !dgHist.past.length;
+  if (r) r.disabled = !dgHist.future.length;
+}
 
 function dgTextWidth(s, size) {
   let w = 0;
@@ -536,7 +650,7 @@ function dgTextWidth(s, size) {
   return w;
 }
 function dgNodeW(n) {
-  const t = dgType(n.type);
+  const t = dgNodeType(n);
   const w = Math.max(dgTextWidth(n.label, 14), n.label !== t.name ? dgTextWidth(t.name, 11) : 0) + 36;
   return Math.round(Math.min(DG.MAX_W, Math.max(DG.MIN_W, w)));
 }
@@ -588,7 +702,7 @@ function dgSvgBody(d, { sel = null, connectFrom = null, forExport = false } = {}
     s += '</g>';
   }
   for (const n of d.nodes) {
-    const t = dgType(n.type), k = DG_KIND[t.kind], w = dgNodeW(n), h = DG.NODE_H;
+    const t = dgNodeType(n), k = DG_KIND[t.kind], w = dgNodeW(n), h = DG.NODE_H;
     const on = sel && sel.kind === 'node' && sel.id === n.id;
     const from = connectFrom === n.id;
     const stroke = on || from ? DG.BLUE : k.stroke;
@@ -614,6 +728,7 @@ const dgDefs = () => `<defs>
 </defs>`;
 
 /* ---------- 편집 화면 ---------- */
+const UNDO_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 010 11H11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 function dgShellHtml() {
   const mode = state.dgMode || 'canvas';
   const tabs = `<div class="seg dg-tabs" role="group" aria-label="다이어그램 방식">
@@ -630,6 +745,7 @@ function dgShellHtml() {
   return `<div class="field"><div class="dg-label-row"><span class="dg-title" id="dg-title">다이어그램 <span class="sub">선택</span></span>${tabs}</div>
     <div class="dg" id="dg">
       <div class="dg-palette" role="toolbar" aria-label="컴포넌트 추가">
+        <button type="button" class="dg-chip dg-chip-custom" data-dg-act="custom-open">+ 직접 추가</button>
         ${DG_TYPES.map((t) => `<button type="button" class="dg-chip" data-dg-add="${t.type}"><i style="background:${DG_KIND[t.kind].chip}"></i>${t.name}</button>`).join('')}
       </div>
       <div class="dg-stage" id="dg-stage">
@@ -640,7 +756,13 @@ function dgShellHtml() {
         </div>
       </div>
       <div class="dg-bar" id="dg-bar"></div>
-      <p class="dg-legend"><span><b class="ln"></b>동기 호출</span><span><b class="ln dash"></b>비동기</span><span><b class="x2">×2</b>2중화 (같은 역할 두 대)</span></p>
+      <div class="dg-foot">
+        <p class="dg-legend"><span><b class="ln"></b>동기 호출</span><span><b class="ln dash"></b>비동기</span><span><b class="x2">×2</b>2중화 (같은 역할 두 대)</span></p>
+        <div class="dg-history">
+          <button class="btn small ghost" type="button" data-dg-act="undo" title="되돌리기 (Ctrl+Z)" aria-label="되돌리기" disabled>${UNDO_ICON}되돌리기</button>
+          <button class="btn small ghost" type="button" data-dg-act="redo" title="다시 하기 (Ctrl+Shift+Z)" aria-label="다시 하기" disabled><span class="flip">${UNDO_ICON}</span></button>
+        </div>
+      </div>
     </div>
   </div>`;
 }
@@ -662,6 +784,7 @@ function dgRender() {
   }
   dgView.ro.disconnect(); dgView.ro.observe(stage);
   dgRenderBar();
+  dgRenderHistory();
 }
 function dgRenderSvg() {
   const stage = $('#dg-stage'), svg = $('#dg-svg');
@@ -671,21 +794,33 @@ function dgRenderSvg() {
   $('#dg-layer').innerHTML = dgSvgBody(state.diagram, { sel: dgView.sel, connectFrom: dgView.connectFrom });
   $('#dg-empty').hidden = state.diagram.nodes.length > 0;
   svg.classList.toggle('connecting', !!dgView.connectFrom);
+  dgRenderHistory();
 }
 
 function dgRenderBar() {
   const bar = $('#dg-bar');
   if (!bar) return;
   const sel = dgView.sel;
+  dgView.typing = null;
   if (dgView.connectFrom) {
     bar.innerHTML = `<span class="dg-tip on">연결할 카드를 눌러주세요</span><button class="btn small" type="button" data-dg-act="cancel-connect">취소</button>`;
+    return;
+  }
+  if (dgView.customOpen) {
+    bar.innerHTML = `
+      <input type="text" id="dg-custom-name" maxlength="20" value="${esc(dgView.customName)}" aria-label="새 카드 이름" placeholder="이름 (예: Elasticsearch)">
+      <div class="seg" role="group" aria-label="카드 종류">
+        ${Object.entries(DG_KIND_LABEL).map(([k, label]) => `<button type="button" data-dg-act="custom-kind" data-kind="${k}" aria-pressed="${dgView.customKind === k}">${label}</button>`).join('')}
+      </div>
+      <button class="btn small primary" type="button" data-dg-act="custom-add">추가</button>
+      <button class="btn small ghost" type="button" data-dg-act="custom-cancel">취소</button>`;
     return;
   }
   if (sel?.kind === 'node') {
     const n = dgFind(sel.id);
     if (!n) { dgView.sel = null; return dgRenderBar(); }
     bar.innerHTML = `
-      <input type="text" id="dg-name" maxlength="20" value="${esc(n.label)}" aria-label="카드 이름" placeholder="${esc(dgType(n.type).name)}">
+      <input type="text" id="dg-name" maxlength="20" value="${esc(n.label)}" aria-label="카드 이름" placeholder="${esc(dgNodeType(n).name)}">
       <button class="btn small ${n.dup ? 'on' : ''}" type="button" data-dg-act="dup" aria-pressed="${!!n.dup}">×2 2중화</button>
       <button class="btn small" type="button" data-dg-act="connect">연결하기</button>
       <button class="btn small danger" type="button" data-dg-act="del">삭제</button>`;
@@ -714,9 +849,10 @@ function dgClamp(n) {
   n.y = Math.max(10, Math.min(dgView.h - DG.NODE_H - (n.dup ? 12 : 6), n.y));
 }
 
-function dgAdd(type, at) {
+function dgAdd(type, at, custom) {
   const d = state.diagram, t = dgType(type);
   const n = { id: 'n' + (++d.seq), type, label: t.name, x: 0, y: 0, dup: false };
+  if (custom) { n.kind = custom.kind; n.label = custom.label; }
   if (at) { n.x = at.x; n.y = at.y; }
   else {
     // 비어 있는 자리를 왼쪽 위부터 격자로 찾는다
@@ -745,13 +881,24 @@ function dgConnect(from, to) {
 function dgDeleteSelected() {
   const d = state.diagram, sel = dgView.sel;
   if (!sel) return;
-  if (sel.kind === 'node') {
-    d.nodes = d.nodes.filter((n) => n.id !== sel.id);
-    d.edges = d.edges.filter((e) => e.from !== sel.id && e.to !== sel.id);
-  } else {
-    d.edges = d.edges.filter((e) => e.id !== sel.id);
-  }
+  dgMutate(() => {
+    if (sel.kind === 'node') {
+      d.nodes = d.nodes.filter((n) => n.id !== sel.id);
+      d.edges = d.edges.filter((e) => e.from !== sel.id && e.to !== sel.id);
+    } else {
+      d.edges = d.edges.filter((e) => e.id !== sel.id);
+    }
+  });
   dgView.sel = null;
+  dgRender();
+}
+
+function dgAddCustom() {
+  const label = ($('#dg-custom-name')?.value ?? dgView.customName).trim();
+  if (!label) { $('#dg-custom-name')?.focus(); return toast('카드 이름을 입력해 주세요.'); }
+  const n = dgMutate(() => dgAdd('custom', null, { label, kind: dgView.customKind }));
+  dgView.customOpen = false; dgView.customName = '';
+  dgView.sel = { kind: 'node', id: n.id };
   dgRender();
 }
 
@@ -770,6 +917,9 @@ document.addEventListener('pointerdown', (ev) => {
   const svg = ev.target.closest('#dg-svg');
   if (!svg) return;
   ev.preventDefault();
+  // 글 입력칸에 포커스가 남아 있으면 Ctrl+Z 가 글 되돌리기로 가버리므로 풀어준다
+  const focused = document.activeElement;
+  if (focused && (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA')) focused.blur();
   const pt = dgPoint(ev);
   const port = ev.target.closest('.dg-port');
   const nodeEl = ev.target.closest('.dg-node');
@@ -778,12 +928,13 @@ document.addEventListener('pointerdown', (ev) => {
   if (dgView.connectFrom) {
     const target = nodeEl ? nodeEl.dataset.id : null;
     if (target && target !== dgView.connectFrom) {
-      const e = dgConnect(dgView.connectFrom, target);
+      const e = dgMutate(() => dgConnect(dgView.connectFrom, target));
       dgView.sel = e ? { kind: 'edge', id: e.id } : { kind: 'node', id: target };
       dgView.connectFrom = null;
     } else if (!target) dgView.connectFrom = null;
     return dgRender();
   }
+  if (nodeEl || edgeEl) dgView.customOpen = false;
   if (port && nodeEl) {
     const n = dgFind(nodeEl.dataset.id);
     dgView.drag = { mode: 'link', from: n.id };
@@ -796,10 +947,11 @@ document.addEventListener('pointerdown', (ev) => {
   }
   if (nodeEl) {
     const n = dgFind(nodeEl.dataset.id);
+    const snap = dgSnapshot();
     // 맨 앞으로 가져오기
     state.diagram.nodes = state.diagram.nodes.filter((x) => x !== n).concat(n);
     dgView.sel = { kind: 'node', id: n.id };
-    dgView.drag = { mode: 'move', id: n.id, dx: pt.x - n.x, dy: pt.y - n.y, moved: false };
+    dgView.drag = { mode: 'move', id: n.id, dx: pt.x - n.x, dy: pt.y - n.y, moved: false, snap, from: { x: n.x, y: n.y } };
     svg.setPointerCapture(ev.pointerId);
     return dgRender();
   }
@@ -829,11 +981,16 @@ function dgEndDrag(ev) {
   if (!drag) return;
   dgView.drag = null;
   if (!$('#dg-svg')) return;
+  if (drag.mode === 'move') {
+    const n = dgFind(drag.id);
+    // 실제로 자리를 옮겼을 때만 되돌리기 한 단계로 남긴다 (클릭만 한 경우 제외)
+    if (n && (n.x !== drag.from.x || n.y !== drag.from.y)) { dgRecord(drag.snap); dgRenderHistory(); }
+  }
   if (drag.mode === 'link') {
     $('#dg-temp').setAttribute('visibility', 'hidden');
     const target = dgNodeAt(dgPoint(ev));
     if (target && target.id !== drag.from) {
-      const e = dgConnect(drag.from, target.id);
+      const e = dgMutate(() => dgConnect(drag.from, target.id));
       if (e) dgView.sel = { kind: 'edge', id: e.id };
     } else {
       dgView.sel = { kind: 'node', id: drag.from };
@@ -847,8 +1004,8 @@ document.addEventListener('pointercancel', dgEndDrag);
 document.addEventListener('click', (ev) => {
   const add = ev.target.closest('[data-dg-add]');
   if (add) {
-    const n = dgAdd(add.dataset.dgAdd);
-    dgView.sel = { kind: 'node', id: n.id };
+    const n = dgMutate(() => dgAdd(add.dataset.dgAdd));
+    dgView.sel = { kind: 'node', id: n.id }; dgView.customOpen = false;
     return dgRender();
   }
   const b = ev.target.closest('[data-dg-act]');
@@ -866,50 +1023,83 @@ document.addEventListener('click', (ev) => {
       const pos = narrow
         ? [{ x: 16, y: 40 }, { x: dgSnap((dgView.w - DG.MIN_W) / 2), y: 160 }, { x: dgView.w - DG.MIN_W - 20, y: 280 }]
         : (() => { const gap = Math.min(240, (dgView.w - 32 - DG.MIN_W) / 2); const y = dgSnap(dgView.h / 2 - DG.NODE_H / 2); return [0, 1, 2].map((i) => ({ x: dgSnap(16 + gap * i), y })); })();
-      const a = dgAdd('client', pos[0]);
-      const s = dgAdd('api', pos[1]);
-      const db = dgAdd('sql', pos[2]);
-      dgConnect(a.id, s.id); dgConnect(s.id, db.id);
+      dgMutate(() => {
+        const a = dgAdd('client', pos[0]);
+        const s = dgAdd('api', pos[1]);
+        const db = dgAdd('sql', pos[2]);
+        dgConnect(a.id, s.id); dgConnect(s.id, db.id);
+      });
       dgView.sel = null;
       return dgRender();
     }
-    case 'dup': if (node) node.dup = !node.dup; return dgRender();
+    case 'dup': if (node) dgMutate(() => { node.dup = !node.dup; }); return dgRender();
     case 'connect': if (node) { dgView.connectFrom = node.id; } return dgRender();
     case 'cancel-connect': dgView.connectFrom = null; return dgRender();
-    case 'sync': if (edge) edge.async = false; return dgRender();
-    case 'async': if (edge) edge.async = true; return dgRender();
-    case 'flip': if (edge) [edge.from, edge.to] = [edge.to, edge.from]; return dgRender();
+    case 'sync': if (edge) dgMutate(() => { edge.async = false; }); return dgRender();
+    case 'async': if (edge) dgMutate(() => { edge.async = true; }); return dgRender();
+    case 'flip': if (edge) dgMutate(() => { [edge.from, edge.to] = [edge.to, edge.from]; }); return dgRender();
     case 'del': return dgDeleteSelected();
     case 'clear':
       if (!confirmed(b)) return;
-      state.diagram = dgNew(); dgView.sel = null;
+      dgMutate(() => { state.diagram = dgNew(); });
+      dgView.sel = null;
       return dgRender();
+    case 'undo': return dgUndo();
+    case 'redo': return dgRedo();
+    case 'custom-open':
+      dgView.customOpen = true; dgView.sel = null; dgView.connectFrom = null;
+      dgRender(); $('#dg-custom-name')?.focus();
+      return;
+    case 'custom-kind':
+      dgView.customName = $('#dg-custom-name')?.value ?? dgView.customName;
+      dgView.customKind = b.dataset.kind;
+      dgRenderBar(); $('#dg-custom-name')?.focus();
+      return;
+    case 'custom-add': return dgAddCustom();
+    case 'custom-cancel': dgView.customOpen = false; dgView.customName = ''; return dgRenderBar();
   }
 });
+
+// 이름을 바꾸는 동안은 글자마다가 아니라 한 번의 편집을 되돌리기 한 단계로 남긴다
+function dgRecordTyping(key) {
+  if (dgView.typing === key) return;
+  dgView.typing = key;
+  dgRecord();
+  dgRenderHistory();
+}
 
 document.addEventListener('input', (ev) => {
   if (ev.target.id === 'dg-name') {
     const n = dgView.sel && dgFind(dgView.sel.id);
-    if (n) { n.label = ev.target.value.trim() || dgType(n.type).name; dgRenderSvg(); }
+    if (n) { dgRecordTyping('n:' + n.id); n.label = ev.target.value.trim() || dgNodeType(n).name; dgRenderSvg(); }
   }
   if (ev.target.id === 'dg-elabel') {
     const e = dgView.sel && state.diagram.edges.find((x) => x.id === dgView.sel.id);
-    if (e) { e.label = ev.target.value.trim(); dgRenderSvg(); }
+    if (e) { dgRecordTyping('e:' + e.id); e.label = ev.target.value.trim(); dgRenderSvg(); }
   }
+  if (ev.target.id === 'dg-custom-name') dgView.customName = ev.target.value;
 });
 
 document.addEventListener('keydown', (ev) => {
   if (!$('#dg-svg')) return;
-  if (ev.key === 'Escape' && (dgView.connectFrom || dgView.sel)) {
-    // 연결 중이거나 선택된 게 있으면 작성 창을 닫지 않고 그것만 푼다
-    ev.stopPropagation(); dgView.connectFrom = null; dgView.sel = null; dgRender(); return;
-  }
-  if (!dgView.sel) return;
   const tag = document.activeElement?.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA') {
-    if (ev.key === 'Enter' && (ev.target.id === 'dg-name' || ev.target.id === 'dg-elabel')) { ev.preventDefault(); ev.target.blur(); }
+  const typing = tag === 'INPUT' || tag === 'TEXTAREA';
+  // 글을 쓰는 중이 아니면 Ctrl/Cmd+Z 는 그림 되돌리기, Ctrl/Cmd+Shift+Z 와 Ctrl+Y 는 다시 하기
+  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && !typing) {
+    const k = ev.key.toLowerCase();
+    if (k === 'z') { ev.preventDefault(); return ev.shiftKey ? dgRedo() : dgUndo(); }
+    if (k === 'y') { ev.preventDefault(); return dgRedo(); }
+  }
+  if (ev.key === 'Escape' && (dgView.connectFrom || dgView.sel || dgView.customOpen)) {
+    // 연결 중이거나 선택된 게 있으면 작성 창을 닫지 않고 그것만 푼다
+    ev.stopPropagation(); dgView.connectFrom = null; dgView.sel = null; dgView.customOpen = false; dgRender(); return;
+  }
+  if (typing) {
+    if (ev.key === 'Enter' && ev.target.id === 'dg-custom-name' && !ev.isComposing) { ev.preventDefault(); dgAddCustom(); }
+    else if (ev.key === 'Enter' && (ev.target.id === 'dg-name' || ev.target.id === 'dg-elabel')) { ev.preventDefault(); ev.target.blur(); }
     return;
   }
+  if (!dgView.sel) return;
   if (ev.key === 'Delete' || ev.key === 'Backspace') { ev.preventDefault(); dgDeleteSelected(); }
 }, true);
 
@@ -1125,12 +1315,16 @@ function viewAdmin() {
 function render() {
   renderChrome();
   const main = $('#main');
+  // 작성 창을 다시 그려도 보던 위치를 유지한다
+  const sheetTop = $('.compose-sheet')?.scrollTop;
   if (state.view === 'archive') main.innerHTML = viewArchive();
   else if (state.view === 'admin') main.innerHTML = viewAdmin();
   else main.innerHTML = viewTopic(state.view === 'today');
   document.body.classList.toggle('composing', !!$('#composer'));
   document.body.classList.toggle('has-fab', !!$('.fab'));
   if ($('#dg-svg')) dgRender();
+  const sheet = $('.compose-sheet');
+  if (sheet && sheetTop) sheet.scrollTop = sheetTop;
 }
 
 /* ---------- loading per view ---------- */
@@ -1146,7 +1340,7 @@ async function openToday() {
 }
 async function openTopic(id) {
   if (id === state.topicId && state.view !== 'today') return go('topic');
-  state.topicId = id; state.composing = false;
+  state.topicId = id; state.composing = false; state.review = null;
   state.openComments.clear(); state.expanded.clear();
   state.draft = TEMPLATE; state.draftFile = null; state.draftPreview = null;
   $('#main').innerHTML = '<p class="loading">불러오는 중…</p>';
@@ -1263,8 +1457,9 @@ document.addEventListener('click', async (ev) => {
     return renderChrome();
   }
   if (act === 'logout') { await api.signOut(); state.editingTopic = null; await refreshMe(); await openToday(); return toast('관리자에서 로그아웃했어요'); }
-  if (act === 'reset-demo') { api.reset(); state.composing = false; state.diagram = dgNew(); state.draft = TEMPLATE; state.draftFile = null; state.draftPreview = null; await refreshMe(); return openToday(); }
+  if (act === 'reset-demo') { api.reset(); state.composing = false; state.diagram = dgNew(); dgResetHistory(); state.review = null; state.draft = TEMPLATE; state.draftFile = null; state.draftPreview = null; await refreshMe(); return openToday(); }
   if (act === 'compose') { state.composing = true; render(); $('#post-content')?.focus(); return; }
+  if (act === 'ai-review') return runReview();
   if (act === 'cancel-compose' || (act === 'backdrop-compose' && ev.target === el)) { if (state.busy) return; state.composing = false; return render(); }
   if (act === 'backdrop-compose') return;
   if (act === 'zoom') return openLightbox(el.dataset.src);
@@ -1355,7 +1550,7 @@ document.addEventListener('submit', async (ev) => {
       await api.createPost(state.topicId, content, file);
       if (state.draftPreview?.startsWith('blob:')) URL.revokeObjectURL(state.draftPreview);
       state.draft = TEMPLATE; state.draftFile = null; state.draftPreview = null; state.composing = false;
-      state.diagram = dgNew(); state.dgMode = 'canvas';
+      state.diagram = dgNew(); dgResetHistory(); state.dgMode = 'canvas'; state.review = null;
       await refreshPosts(); await refreshTopics();
       state.sort = 'new';
       toast('설계를 올렸어요. 다른 사람들의 답도 둘러보세요');

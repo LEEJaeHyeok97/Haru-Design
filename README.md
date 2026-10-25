@@ -10,8 +10,17 @@
 index.html   마크업
 styles.css   스타일
 app.js       앱 로직 (Supabase API, 데모 모드, 설계 캔버스, 화면 렌더링)
-vercel.json  Vercel 설정 (헤더, cleanUrls)
+api/review.js  AI 평가 서버 함수 (Vercel Function)
+vercel.json  Vercel 설정 (헤더, cleanUrls, 함수 실행 시간)
 ```
+
+## AI 평가
+
+작성 창의 **AI 평가 받기**를 누르면 `api/review.js`(Vercel 서버 함수)가 문제, 설계 설명, 다이어그램을 Claude(`claude-opus-5-5`)에게 보내 점수와 피드백을 받아옵니다. 결과는 저장하지 않고 작성자에게만 보여 줍니다.
+
+- Vercel > Project > Settings > Environment Variables에 `ANTHROPIC_API_KEY`를 넣고 다시 배포해야 동작합니다.
+- 로그인(익명 포함)한 사용자만 호출할 수 있도록 Supabase 토큰을 확인합니다.
+- 비용은 [Anthropic Console](https://console.anthropic.com)에서 월 사용 한도를 걸어 관리하세요.
 
 ## 로컬에서 실행
 
