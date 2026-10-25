@@ -1812,13 +1812,12 @@ function spImageCtrlHtml() {
     </div>
     ${img ? `
       <div class="sp-opt"><span>비율</span>${seg('ratio', SP_RATIOS, st.ratio)}</div>
-      ${st.ratio !== 'auto' ? `<div class="sp-opt"><span>맞춤</span>${seg('fit', SP_FITS, st.fit)}</div>` : ''}
-      ${st.ratio !== 'auto' && st.fit === 'cover' ? `
-        <div class="sp-opt sp-focus-opt"><span>보일 위치</span>
-          <div class="sp-focus" id="sp-focus" title="보이게 할 부분을 누르거나 끌어 주세요"><img src="${esc(img)}" alt="" draggable="false"><i style="left:${st.x}%;top:${st.y}%"></i></div>
-          <small>사진에서 꼭 보여야 할 부분을 누르거나 끌어 주세요.</small></div>` : ''}
-      ${st.ratio !== 'auto' && st.fit === 'contain' ? '<p class="sp-tip">비율에 맞지 않는 부분은 여백으로 남아요.</p>' : ''}
-      ${st.ratio === 'auto' ? '<p class="sp-tip">올린 이미지 비율 그대로 보여요. 너무 길면 높이 360px에서 줄여요.</p>' : ''}` : ''}
+      <div class="sp-opt ${st.ratio === 'auto' ? 'is-idle' : ''}"><span>맞춤</span>${seg('fit', SP_FITS, st.ratio === 'auto' ? '' : st.fit)}</div>
+      <div class="sp-opt sp-focus-opt ${st.ratio === 'auto' || st.fit === 'contain' ? 'is-idle' : ''}"><span>보일 위치</span>
+        <div class="sp-focus" id="sp-focus" title="보이게 할 부분을 누르거나 끌어 주세요"><img src="${esc(img)}" alt="" draggable="false"><i style="left:${st.x}%;top:${st.y}%"></i></div>
+        <small>${st.ratio === 'auto' ? '지금은 원본 비율이라 잘리지 않아요. 위치를 누르면 가로형으로 바꾸고 그 부분이 보이게 잘라요.'
+          : st.fit === 'contain' ? '지금은 전체 보이기라 잘리지 않고 남는 곳은 여백이에요. 위치를 누르면 꽉 채우기로 바꿔요.'
+          : '사진에서 꼭 보여야 할 부분을 누르거나 끌어 주세요.'}</small></div>` : ''}
   </div>`;
 }
 function sponsorsAdminHtml() {
@@ -1898,6 +1897,12 @@ document.addEventListener('pointerdown', (ev) => {
   if (!ev.target.closest('#sp-focus')) return;
   ev.preventDefault();
   spFocus.dragging = true;
+  // 잘리지 않는 상태에서 위치를 고르면 자르는 모드(가로형 · 꽉 채우기)로 바꾼 뒤 위치를 정한다
+  const e = spEditing(), st = spStyle(e.image_style);
+  if (st.ratio === 'auto' || st.fit === 'contain') {
+    e.image_style = { ...st, ratio: st.ratio === 'auto' ? '1.91' : st.ratio, fit: 'cover' };
+    renderSponsorImageCtrl();
+  }
   spSetFocus(ev);
 });
 document.addEventListener('pointermove', (ev) => { if (spFocus.dragging) spSetFocus(ev); });
@@ -2171,7 +2176,10 @@ document.addEventListener('click', async (ev) => {
   }
   if (act === 'sp-style') {
     const e = spEditing();
-    e.image_style = spStyle({ ...e.image_style, [el.dataset.k]: el.dataset.v });
+    const next = { ...spStyle(e.image_style), [el.dataset.k]: el.dataset.v };
+    // 원본 비율에서 맞춤을 고르면 자를 비율이 필요하니 가로형으로 바꾼다
+    if (el.dataset.k === 'fit' && next.ratio === 'auto') next.ratio = '1.91';
+    e.image_style = spStyle(next);
     return renderSponsorImageCtrl();
   }
   if (act === 'sponsor-move') {
