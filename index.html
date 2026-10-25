@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>하루설계</title>
+<meta name="description" content="하루 10분, 설계 판단 연습. 매일 공개되는 시스템 설계 문제에 답하고 다른 사람들의 설계와 비교해 보세요.">
+<meta name="theme-color" content="#ffffff">
+<meta property="og:title" content="하루설계">
+<meta property="og:description" content="하루 10분, 설계 판단 연습">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='12' fill='%233182f6'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<link rel="stylesheet" href="/styles.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js" defer></script>
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap">
+    <button class="brand" type="button" data-nav="today"><b>하루설계</b><span>하루 10분, 설계 판단 연습</span></button>
+    <nav class="nav" id="nav"></nav>
+    <div class="who" id="who"></div>
+  </div>
+</header>
+<div class="wrap">
+  <div id="banner"></div>
+  <main id="main"><p class="loading">불러오는 중…</p></main>
+  <footer class="foot-links">
+    <p class="contact">
+      <span>문의 <a href="mailto:hazardous10@naver.com">hazardous10@naver.com</a></span>
+      <span class="sep" aria-hidden="true">·</span>
+      <a href="https://github.com/LEEJaeHyeok97" target="_blank" rel="noopener">GitHub</a>
+    </p>
+    <button type="button" data-nav="admin">관리자</button>
+  </footer>
+</div>
+<div id="layer"></div>
+</body>
+</html>
