@@ -182,10 +182,13 @@ async function createSupabaseApi(onAuthChange) {
       else must(await sb.from('likes').delete().eq('post_id', postId).eq('user_id', uid()));
     },
     async listComments(postId) {
-      const rows = must(await sb.from('comments').select('id,user_id,content,created_at,author:profiles!comments_user_id_fkey(id,nickname)').eq('post_id', postId).order('created_at'));
-      return rows.map((c) => ({ ...c, author: c.author || { id: c.user_id, nickname: '알 수 없음' } }));
+      // '*' 로 가져와서 parent_id 컬럼이 아직 없는 DB 에서도 댓글은 그대로 보이게 한다
+      const rows = must(await sb.from('comments').select('*,author:profiles!comments_user_id_fkey(id,nickname)').eq('post_id', postId).order('created_at'));
+      return rows.map((c) => ({ ...c, parent_id: c.parent_id ?? null, author: c.author || { id: c.user_id, nickname: '알 수 없음' } }));
     },
-    async addComment(postId, content) { must(await sb.from('comments').insert({ post_id: postId, content })); },
+    async addComment(postId, content, parentId = null) {
+      must(await sb.from('comments').insert({ post_id: postId, content, ...(parentId ? { parent_id: parentId } : {}) }));
+    },
     async deleteComment(id) { must(await sb.from('comments').delete().eq('id', id)); },
 
     // AI 평가는 Vercel 서버 함수(/api/review)가 처리한다. 만료된 토큰은 getSession 이 갱신해 준다.
@@ -197,9 +200,13 @@ async function createSupabaseApi(onAuthChange) {
         body: JSON.stringify(payload),
       });
       const data = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(data.error || 'AI 평가를 받지 못했어요. 잠시 뒤 다시 시도해 주세요.');
+      if (!r.ok) throw Object.assign(new Error(data.error || 'AI 평가를 받지 못했어요. 잠시 뒤 다시 시도해 주세요.'), { status: r.status });
       return data;
     },
+
+    // 관리자 지표 (supabase/2026-10-25-admin-metrics.sql). 기록 실패는 조용히 넘긴다.
+    async track(row) { await sb.from('events').insert(row); },
+    async adminMetrics(days) { return must(await sb.rpc('admin_metrics', { days })); },
   };
 }
 
@@ -296,7 +303,56 @@ function demoSeed() {
     { id: 202, post_id: 101, user_id: 'u-mocha', created_at: t(33), content: '내가 눌렀는지는 likes 쪽을 따로 보고, 화면에서 +1 해서 보여주는 식으로 처리하려고 했어요.' },
     { id: 203, post_id: 103, user_id: 'u-4', created_at: t(120), content: '추천까지 생각한 건 좋은데, 그 전까지 Kafka 운영은 누가 하나요?' },
   ];
-  return { users, topics, posts, likes, comments, me: null, seq: 1000 };
+  return { users, topics, posts, likes, comments, events: demoEvents(), me: null, seq: 1000 };
+}
+
+// 데모용 지난 3주 이용 기록 (매번 같은 값이 나오도록 간단한 의사 난수 사용)
+function demoEvents() {
+  let seed = 7;
+  const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const events = [];
+  const paths = ['/today', '/today', '/today', '/archive', '/topic'];
+  for (let d = 20; d >= 0; d--) {
+    const day = new Date(Date.now() - d * 86400000);
+    const visitors = Math.round(14 + d % 7 * 2 + rand() * 10);
+    for (let v = 0; v < visitors; v++) {
+      const vid = `demo-${d}-${v}`.padEnd(8, '0');
+      const at = (min) => new Date(day.getTime() - min * 60000).toISOString();
+      const views = 1 + Math.floor(rand() * 3);
+      for (let i = 0; i < views; i++) events.push({ visitor_id: vid, type: 'view', path: paths[Math.floor(rand() * paths.length)], created_at: at(rand() * 600) });
+      if (rand() < 0.3) events.push({ visitor_id: vid, type: 'like', path: 'on', created_at: at(rand() * 600) });
+      if (rand() < 0.15) events.push({ visitor_id: vid, type: 'comment_create', path: rand() < 0.3 ? 'reply' : 'comment', created_at: at(rand() * 600) });
+      if (rand() < 0.1) events.push({ visitor_id: vid, type: 'post_create', path: null, created_at: at(rand() * 600) });
+      if (rand() < 0.08) events.push({ visitor_id: vid, type: 'ai_review', path: null, status: rand() < 0.1 ? 502 : 200, duration_ms: Math.round(18000 + rand() * 20000), created_at: at(rand() * 600) });
+    }
+  }
+  return events;
+}
+
+// admin_metrics() SQL 과 같은 모양으로 집계한다 (데모 모드용)
+function aggregateMetrics(events, days) {
+  const today = kstDate();
+  const first = addDays(today, -(days - 1));
+  const ev = events.map((e) => ({ ...e, day: kstDate(new Date(e.created_at)) })).filter((e) => e.day >= first && e.day <= today);
+  const daily = [];
+  for (let d = first; d <= today; d = addDays(d, 1)) {
+    const views = ev.filter((e) => e.day === d && e.type === 'view');
+    daily.push({ day: d, visitors: new Set(views.map((e) => e.visitor_id)).size, views: views.length });
+  }
+  const groups = new Map();
+  for (const e of ev) {
+    const key = e.type + ' ' + (e.path || '');
+    const g = groups.get(key) || { type: e.type, path: e.path || '', count: 0, today: 0, errors: 0, ms: [] };
+    g.count++; if (e.day === today) g.today++;
+    if (e.status >= 400) g.errors++;
+    if (e.duration_ms != null) g.ms.push(e.duration_ms);
+    groups.set(key, g);
+  }
+  const endpoints = [...groups.values()]
+    .map(({ ms, ...g }) => ({ ...g, avg_ms: ms.length ? Math.round(ms.reduce((a, b) => a + b, 0) / ms.length) : null }))
+    .sort((a, b) => b.count - a.count);
+  const views = ev.filter((e) => e.type === 'view');
+  return { days, today, daily, endpoints, range: { visitors: new Set(views.map((e) => e.visitor_id)).size, views: views.length } };
 }
 
 function createDemoApi() {
@@ -386,13 +442,20 @@ function createDemoApi() {
       await wait();
       return db.comments.filter((c) => c.post_id === postId).sort((a, b) => a.created_at.localeCompare(b.created_at)).map((c) => ({ ...c, author: user(c.user_id) }));
     },
-    async addComment(postId, content) {
+    async addComment(postId, content, parentId = null) {
       const me = need();
-      db.comments.push({ id: nextId(), post_id: postId, user_id: me, content, created_at: new Date().toISOString() });
+      db.comments.push({ id: nextId(), post_id: postId, user_id: me, content, parent_id: parentId, created_at: new Date().toISOString() });
       save();
     },
-    async deleteComment(id) { db.comments = db.comments.filter((c) => c.id !== id); save(); },
+    // 댓글을 지우면 달린 답글도 함께 지운다 (Supabase 의 on delete cascade 와 같게)
+    async deleteComment(id) { db.comments = db.comments.filter((c) => c.id !== id && c.parent_id !== id); save(); },
     async review() { throw new Error('AI 평가는 데모 모드에서는 쓸 수 없어요.'); },
+
+    async track(row) {
+      db.events = (db.events || []).concat({ ...row, created_at: new Date().toISOString() }).slice(-3000);
+      save();
+    },
+    async adminMetrics(days) { needAdmin(); await wait(); return aggregateMetrics(db.events || [], days); },
   };
 }
 
@@ -410,6 +473,7 @@ const state = {
   expanded: new Set(),    // 펼친 본문
   openComments: new Set(),
   comments: {},           // postId -> comment[]
+  replyTo: null,          // 답글 입력 중인 자리: { postId, rootId, nick }
   draft: TEMPLATE,
   draftFile: null,
   draftPreview: null,
@@ -419,7 +483,26 @@ const state = {
   composing: false,       // 작성 폼 열림 여부
   busy: false,
   review: null,           // AI 평가: { loading } | { result } | { error }
+  metrics: null,          // 관리자 지표: { days, data, loading, error }
 };
+
+/* ---------- 이용 기록 (관리자 지표용) ---------- */
+// 브라우저마다 임의의 id 하나만 둔다. IP 나 기기 정보는 남기지 않는다.
+const VISITOR_KEY = 'harusolgye-visitor';
+// randomUUID 는 https 에서만 있으므로 없으면 난수 문자열로 대신한다
+const randomId = () => crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
+const visitorId = (() => {
+  try {
+    let id = localStorage.getItem(VISITOR_KEY);
+    if (!id) { id = randomId(); localStorage.setItem(VISITOR_KEY, id); }
+    return id;
+  } catch { return randomId(); }
+})();
+// 관리자 본인의 사용은 지표에서 뺀다. 기록이 실패해도 화면에는 영향이 없다.
+function track(type, path = null, extra = {}) {
+  if (!api || state.me?.isAdmin) return;
+  api.track({ visitor_id: visitorId, type, path, ...extra }).catch(() => {});
+}
 
 const publishedTopics = () => state.topics.filter((t) => t.publish_date <= kstDate());
 const currentTopic = () => state.topics.find((t) => t.id === state.topicId) || null;
@@ -430,6 +513,8 @@ function go(view, topicId = null) {
   try { history.replaceState(null, '', view === 'today' ? location.pathname + location.search : '#' + (view === 'topic' ? 'archive' : view)); } catch { /* frame may refuse */ }
   window.scrollTo({ top: 0 });
   render();
+  track('view', '/' + view);
+  if (view === 'admin' && state.me?.isAdmin) loadMetrics();
 }
 
 async function refreshMe() { state.me = await api.me(); }
@@ -551,14 +636,20 @@ async function runReview() {
   const nickname = $('#post-nick')?.value.trim().slice(0, 20);
   if (!state.me && !nickname) { $('#post-nick')?.focus(); return toast('닉네임을 먼저 입력해 주세요.'); }
   state.review = { loading: true }; render();
+  let started = 0;
   try {
     if (!state.me) { await api.ensureUser(nickname); await refreshMe(); }
     const file = state.dgMode === 'image' ? state.draftFile : await dgExportPng();
     let image = null;
     if (file) { const { blob } = await prepareImage(file, { max: 1400 }); image = await blobToDataURL(blob); }
+    started = performance.now();
     const result = await api.review({ topic: { title: topic.title, description: topic.description }, content, image });
+    track('ai_review', null, { status: 200, duration_ms: Math.round(performance.now() - started) });
     state.review = { result };
-  } catch (e) { state.review = { error: friendlyError(e) }; }
+  } catch (e) {
+    if (started) track('ai_review', null, { status: e.status || 500, duration_ms: Math.round(performance.now() - started) });
+    state.review = { error: friendlyError(e) };
+  }
   render();
 }
 
@@ -1174,18 +1265,45 @@ function likeBtn(p) {
   return `<button class="react ${p.liked ? 'liked' : ''}" type="button" data-act="like" data-id="${p.id}" aria-pressed="${p.liked}" aria-label="좋아요 ${p.like_count}개">${p.liked ? HEART : HEART_O}<span class="n">${p.like_count}</span></button>`;
 }
 
+// 답글 맨 앞의 @닉네임 은 강조해서 보여준다
+const commentText = (s) => esc(s).replace(/^@(\S+)/, '<span class="mention">@$1</span>');
+
+function commentHtml(p, c, rootId) {
+  const reply = c.id !== rootId;
+  const canDelete = state.me && (state.me.id === c.user_id || state.me.isAdmin);
+  return `
+      <div class="comment ${reply ? 'reply' : ''}">
+        <span class="avatar" aria-hidden="true">${initial(c.author.nickname)}</span>
+        <div class="c-body"><b>${esc(c.author.nickname)}</b><time datetime="${c.created_at}">${ago(c.created_at)}</time>${
+          canDelete ? `<button class="del" type="button" data-act="del-comment" data-id="${c.id}" data-post="${p.id}">삭제</button>` : ''
+        }<p>${commentText(c.content)}</p>
+        <button class="c-reply" type="button" data-act="reply" data-post="${p.id}" data-root="${rootId}" data-nick="${reply ? esc(c.author.nickname) : ''}">답글</button></div>
+      </div>`;
+}
+
 function commentsHtml(p) {
   if (!state.openComments.has(p.id)) return '';
   const list = state.comments[p.id];
-  const body = !list ? '<p class="c-empty">불러오는 중…</p>'
-    : !list.length ? '<p class="c-empty">아직 댓글이 없어요. 궁금한 점이나 다른 관점을 남겨보세요.</p>'
-    : list.map((c) => `
-      <div class="comment">
-        <span class="avatar" aria-hidden="true">${initial(c.author.nickname)}</span>
-        <div class="c-body"><b>${esc(c.author.nickname)}</b><time datetime="${c.created_at}">${ago(c.created_at)}</time>${
-          state.me && (state.me.id === c.user_id || state.me.isAdmin) ? `<button class="del" type="button" data-act="del-comment" data-id="${c.id}" data-post="${p.id}">삭제</button>` : ''
-        }<p>${esc(c.content)}</p></div>
-      </div>`).join('');
+  let body;
+  if (!list) body = '<p class="c-empty">불러오는 중…</p>';
+  else if (!list.length) body = '<p class="c-empty">아직 댓글이 없어요. 궁금한 점이나 다른 관점을 남겨보세요.</p>';
+  else {
+    // 답글은 한 단계까지만: 최상위 댓글 아래에 시간순으로 모은다
+    const ids = new Set(list.map((c) => c.id));
+    const roots = list.filter((c) => !c.parent_id || !ids.has(c.parent_id));
+    const r = state.replyTo;
+    body = roots.map((root) => {
+      const replies = list.filter((c) => c.parent_id === root.id);
+      const open = r && r.postId === p.id && r.rootId === root.id;
+      const form = open ? `
+        <form class="c-form reply-form" data-post="${p.id}" data-parent="${root.id}">
+          <input type="text" id="r-input-${root.id}" name="c" maxlength="1000" placeholder="${esc(root.author.nickname)}님에게 답글 남기기" aria-label="답글" value="${r.nick ? `@${esc(r.nick)} ` : ''}">
+          <button class="btn small ghost" type="button" data-act="cancel-reply">취소</button>
+          <button class="btn small" type="submit">등록</button>
+        </form>` : '';
+      return `<div class="thread">${commentHtml(p, root, root.id)}${replies.length || open ? `<div class="replies">${replies.map((c) => commentHtml(p, c, root.id)).join('')}${form}</div>` : ''}</div>`;
+    }).join('');
+  }
   const form = `<form class="c-form" data-post="${p.id}"><input type="text" id="c-input-${p.id}" name="c" maxlength="1000" placeholder="댓글 남기기" aria-label="댓글"><button class="btn small" type="submit">등록</button></form>`;
   return `<div class="comments">${body}${form}</div>`;
 }
@@ -1261,6 +1379,119 @@ function nextFreeDate() {
   return d;
 }
 
+/* ---------- 관리자 지표 ---------- */
+const ENDPOINTS = {
+  'view /today': ['GET', '오늘의 문제'],
+  'view /archive': ['GET', '지난 문제'],
+  'view /topic': ['GET', '문제 상세'],
+  'view /admin': ['GET', '관리자 로그인'],
+  'post_create ': ['POST', '설계 올리기'],
+  'comment_create comment': ['POST', '댓글'],
+  'comment_create reply': ['POST', '답글'],
+  'like on': ['POST', '좋아요'],
+  'like off': ['DELETE', '좋아요 취소'],
+  'ai_review ': ['POST', '/api/review · AI 평가'],
+};
+const fmtNum = (n) => Number(n || 0).toLocaleString('ko-KR');
+const fmtSec = (ms) => (ms == null ? '-' : `${(ms / 1000).toFixed(1)}초`);
+// 축 눈금이 깔끔하게 떨어지도록 최댓값을 1·2·5 단위로 올린다
+function niceMax(v) {
+  const p = 10 ** Math.floor(Math.log10(Math.max(1, v)));
+  return [1, 2, 5, 10].map((m) => m * p).find((x) => x >= v);
+}
+
+// 지표 영역만 다시 그린다 (아래 문제 등록 폼에 입력 중인 내용이 지워지지 않게)
+function renderMetrics() {
+  const el = $('.metrics');
+  if (el) el.outerHTML = metricsHtml();
+}
+
+async function loadMetrics(days = state.metrics?.days || 14) {
+  state.metrics = { ...(state.metrics || {}), days, loading: true, error: null };
+  renderMetrics();
+  try { state.metrics = { days, data: await api.adminMetrics(days) }; }
+  catch (e) {
+    const m = (e && e.message) || '';
+    state.metrics = { days, error: /admin_metrics|function|schema cache/i.test(m)
+      ? '지표용 DB 설정이 아직 없어요. supabase/2026-10-25-admin-metrics.sql 을 SQL Editor 에서 실행해 주세요.'
+      : friendlyError(e) };
+  }
+  renderMetrics();
+}
+
+function statTile(label, value, sub) {
+  return `<div class="tile"><span class="tile-label">${label}</span><b class="tile-value mono">${value}</b>${sub ? `<span class="tile-sub">${sub}</span>` : ''}</div>`;
+}
+
+function dailyChartHtml(daily) {
+  const max = niceMax(Math.max(...daily.map((x) => x.visitors)));
+  const step = Math.ceil(daily.length / 7);
+  const label = (d) => `${d.slice(5).replace('-', '.')} (${weekday(d)})`;
+  return `
+  <div class="chart" role="img" aria-label="최근 ${daily.length}일 일별 방문자 수">
+    <div class="chart-y mono" aria-hidden="true"><span>${fmtNum(max)}</span><span>${fmtNum(max / 2)}</span><span>0</span></div>
+    <div class="chart-plot">
+      <i class="grid" style="top:0"></i><i class="grid" style="top:50%"></i><i class="grid base" style="top:100%"></i>
+      ${daily.map((d) => `
+        <div class="col" tabindex="0" data-tip="${label(d.day)}|방문자 ${fmtNum(d.visitors)}명|페이지뷰 ${fmtNum(d.views)}회">
+          <i style="height:${(d.visitors / max) * 100}%"></i>
+        </div>`).join('')}
+      <div class="chart-tip" hidden></div>
+    </div>
+    <div class="chart-x mono" aria-hidden="true">${daily.map((d, i) => `<span>${(daily.length - 1 - i) % step === 0 ? d.day.slice(5).replace('-', '.') : ''}</span>`).join('')}</div>
+  </div>
+  <details class="chart-table"><summary>표로 보기</summary>
+    <table><thead><tr><th>날짜</th><th>방문자</th><th>페이지뷰</th></tr></thead>
+    <tbody>${[...daily].reverse().map((d) => `<tr><td>${label(d.day)}</td><td class="mono">${fmtNum(d.visitors)}</td><td class="mono">${fmtNum(d.views)}</td></tr>`).join('')}</tbody></table>
+  </details>`;
+}
+
+function endpointsHtml(endpoints, days) {
+  if (!endpoints.length) return '<p class="hint">아직 기록된 요청이 없어요.</p>';
+  const max = Math.max(...endpoints.map((e) => e.count));
+  return `
+  <table class="ep-table">
+    <thead><tr><th>요청</th><th>오늘</th><th>${days}일</th><th>실패</th><th>평균 응답</th></tr></thead>
+    <tbody>${endpoints.map((e) => {
+      const [method, name] = ENDPOINTS[`${e.type} ${e.path}`] || ['', `${e.type} ${e.path}`];
+      return `<tr>
+        <td><span class="method">${method}</span>${esc(name)}</td>
+        <td class="mono">${fmtNum(e.today)}</td>
+        <td><div class="ep-count"><span class="ep-bar" aria-hidden="true"><i style="width:${(e.count / max) * 100}%"></i></span><span class="mono">${fmtNum(e.count)}</span></div></td>
+        <td class="mono">${e.errors ? `<span class="ep-err">⚠ ${fmtNum(e.errors)}</span>` : '0'}</td>
+        <td class="mono">${fmtSec(e.avg_ms)}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table>`;
+}
+
+function metricsHtml() {
+  const m = state.metrics || { days: 14, loading: true };
+  const seg = `<div class="seg" role="group" aria-label="기간">${[7, 14, 30].map((d) => `<button type="button" data-act="metrics-days" data-days="${d}" aria-pressed="${m.days === d}">${d}일</button>`).join('')}</div>`;
+  const head = `<div class="metrics-head"><h2>운영 지표</h2>${seg}<button class="btn ghost small" type="button" data-act="metrics-refresh" ${m.loading ? 'disabled' : ''}>${m.loading ? '불러오는 중…' : '새로고침'}</button></div>`;
+  if (m.error) return `<section class="panel metrics">${head}<p class="err" role="alert">${esc(m.error)}</p></section>`;
+  if (!m.data) return `<section class="panel metrics">${head}<p class="loading">불러오는 중…</p></section>`;
+  const d = m.data;
+  const today = d.daily[d.daily.length - 1] || { visitors: 0, views: 0 };
+  const yesterday = d.daily[d.daily.length - 2];
+  const ai = d.endpoints.find((e) => e.type === 'ai_review') || { count: 0, today: 0, errors: 0, avg_ms: null };
+  return `
+  <section class="panel metrics ${m.loading ? 'is-loading' : ''}">
+    ${head}
+    <div class="tiles">
+      ${statTile('오늘 방문자', fmtNum(today.visitors), yesterday ? `어제 ${fmtNum(yesterday.visitors)}명` : '')}
+      ${statTile('오늘 페이지뷰', fmtNum(today.views), yesterday ? `어제 ${fmtNum(yesterday.views)}회` : '')}
+      ${statTile(`${d.days}일 방문자`, fmtNum(d.range.visitors), `페이지뷰 ${fmtNum(d.range.views)}회`)}
+      ${statTile(`${d.days}일 AI 평가`, fmtNum(ai.count), `실패 ${fmtNum(ai.errors)}건 · 평균 ${fmtSec(ai.avg_ms)}`)}
+    </div>
+    <h3>일별 방문자</h3>
+    ${dailyChartHtml(d.daily)}
+    <h3>요청별 횟수</h3>
+    ${endpointsHtml(d.endpoints, d.days)}
+    <p class="metrics-note">방문자는 브라우저 기준이에요. 관리자 본인의 사용은 빠져 있고, 날짜는 한국 시간 기준이에요.</p>
+  </section>`;
+}
+
 function viewAdmin() {
   if (!state.me?.isAdmin) {
     return `
@@ -1281,6 +1512,7 @@ function viewAdmin() {
   const today = kstDate();
   const rows = [...state.topics].sort((a, b) => b.publish_date.localeCompare(a.publish_date));
   return `
+  ${metricsHtml()}
   <div><h1 class="page-title">문제 관리</h1><p class="page-sub">날짜마다 문제 하나가 그날 0시(한국 시간)에 공개돼요. 미래 날짜로 미리 예약해 둘 수 있어요.</p></div>
   <section class="panel">
     <h2>${e.id ? '문제 수정' : '새 문제 등록'}</h2>
@@ -1402,18 +1634,27 @@ async function toggleLike(id) {
   p.liked = on; p.like_count += on ? 1 : -1;
   const btn = document.querySelector(`[data-act="like"][data-id="${id}"]`);
   if (btn) btn.outerHTML = likeBtn(p);
-  try { await api.setLike(id, on); }
+  try { await api.setLike(id, on); track('like', on ? 'on' : 'off'); }
   catch (e) { p.liked = !on; p.like_count += on ? -1 : 1; render(); toast(friendlyError(e)); }
 }
 
-async function submitComment(postId, text) {
+async function submitComment(postId, text, parentId = null) {
   try {
-    await api.addComment(postId, text);
+    await api.addComment(postId, text, parentId);
+    track('comment_create', parentId ? 'reply' : 'comment');
     state.comments[postId] = await api.listComments(postId);
     const p = state.posts.find((x) => x.id === postId); if (p) p.comment_count = state.comments[postId].length;
+    if (parentId) state.replyTo = null;
     render();
-    $(`#c-input-${postId}`)?.focus();
+    if (!parentId) $(`#c-input-${postId}`)?.focus();
   } catch (e) { render(); toast(friendlyError(e)); }
+}
+
+function openReply(postId, rootId, nick) {
+  state.replyTo = { postId, rootId, nick };
+  render();
+  const input = $(`#r-input-${rootId}`);
+  if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
 }
 function closeLayer() { $('#layer').innerHTML = ''; }
 function openLightbox(src) {
@@ -1460,6 +1701,10 @@ document.addEventListener('click', async (ev) => {
   if (act === 'reset-demo') { api.reset(); state.composing = false; state.diagram = dgNew(); dgResetHistory(); state.review = null; state.draft = TEMPLATE; state.draftFile = null; state.draftPreview = null; await refreshMe(); return openToday(); }
   if (act === 'compose') { state.composing = true; render(); $('#post-content')?.focus(); return; }
   if (act === 'ai-review') return runReview();
+  if (act === 'reply') return openReply(Number(el.dataset.post) || el.dataset.post, Number(el.dataset.root) || el.dataset.root, el.dataset.nick);
+  if (act === 'cancel-reply') { state.replyTo = null; return render(); }
+  if (act === 'metrics-days') return loadMetrics(Number(el.dataset.days));
+  if (act === 'metrics-refresh') return loadMetrics();
   if (act === 'cancel-compose' || (act === 'backdrop-compose' && ev.target === el)) { if (state.busy) return; state.composing = false; return render(); }
   if (act === 'backdrop-compose') return;
   if (act === 'zoom') return openLightbox(el.dataset.src);
@@ -1548,6 +1793,7 @@ document.addEventListener('submit', async (ev) => {
       if (!state.me) { await api.ensureUser(nickname); await refreshMe(); }
       const file = state.dgMode === 'image' ? state.draftFile : await dgExportPng();
       await api.createPost(state.topicId, content, file);
+      track('post_create');
       if (state.draftPreview?.startsWith('blob:')) URL.revokeObjectURL(state.draftPreview);
       state.draft = TEMPLATE; state.draftFile = null; state.draftPreview = null; state.composing = false;
       state.diagram = dgNew(); dgResetHistory(); state.dgMode = 'canvas'; state.review = null;
@@ -1579,11 +1825,12 @@ document.addEventListener('submit', async (ev) => {
   if (form.classList.contains('c-form')) {
     ev.preventDefault();
     const postId = Number(form.dataset.post) || form.dataset.post;
+    const parentId = form.dataset.parent ? Number(form.dataset.parent) || form.dataset.parent : null;
     const input = form.querySelector('input');
     const text = input.value.trim();
-    if (!text) return;
+    if (!text || (parentId && /^@\S+$/.test(text))) return;
     input.disabled = true;
-    requireUser(() => submitComment(postId, text));
+    requireUser(() => submitComment(postId, text, parentId));
     if (!state.me) input.disabled = false;
     return;
   }
@@ -1598,6 +1845,28 @@ document.addEventListener('submit', async (ev) => {
     } catch (e) { err.textContent = friendlyError(e); err.hidden = false; }
   }
 });
+
+/* ---------- 지표 차트 툴팁 ---------- */
+function showChartTip(col) {
+  const tip = col.parentElement.querySelector('.chart-tip');
+  const [title, ...rows] = col.dataset.tip.split('|');
+  tip.innerHTML = `<b>${esc(title)}</b>${rows.map((r) => `<span>${esc(r)}</span>`).join('')}`;
+  tip.hidden = false;
+  const plot = col.parentElement.getBoundingClientRect(), bar = col.querySelector('i').getBoundingClientRect();
+  const x = bar.left - plot.left + bar.width / 2;
+  tip.style.left = `${Math.min(Math.max(x, tip.offsetWidth / 2), plot.width - tip.offsetWidth / 2)}px`;
+  tip.style.top = `${bar.top - plot.top - 8}px`;
+  col.parentElement.querySelectorAll('.col.on').forEach((o) => o.classList.remove('on'));
+  col.classList.add('on');
+}
+function hideChartTip(plot) {
+  plot.querySelector('.chart-tip').hidden = true;
+  plot.querySelectorAll('.col.on').forEach((o) => o.classList.remove('on'));
+}
+document.addEventListener('pointerover', (ev) => { const col = ev.target.closest('.chart .col'); if (col) showChartTip(col); });
+document.addEventListener('pointerout', (ev) => { const plot = ev.target.closest('.chart-plot'); if (plot && !plot.contains(ev.relatedTarget)) hideChartTip(plot); });
+document.addEventListener('focusin', (ev) => { if (ev.target.matches?.('.chart .col')) showChartTip(ev.target); });
+document.addEventListener('focusout', (ev) => { if (ev.target.matches?.('.chart .col')) hideChartTip(ev.target.parentElement); });
 
 /* ---------- boot ---------- */
 (async function boot() {
