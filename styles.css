@@ -110,6 +110,14 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .demo-banner strong { font-weight: 700; }
 .demo-banner .btn { margin-left: auto; background: #fff; }
 
+.move-banner {
+  margin-top: 16px; padding: 14px 18px; border-radius: 16px;
+  background: var(--marker-soft); color: var(--marker-press); font-size: var(--text-sm); font-weight: 500;
+  display: flex; gap: 6px 10px; flex-wrap: wrap; align-items: center;
+}
+.move-banner strong { font-weight: 700; }
+.move-banner .btn { margin-left: auto; text-decoration: none; }
+
 main { display: grid; gap: 12px; padding-top: 16px; }
 
 /* ---------- topic sheet ---------- */
