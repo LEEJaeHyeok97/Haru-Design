@@ -158,6 +158,7 @@ async function createSupabaseApi(onAuthChange) {
       return rows.map((r) => ({
         id: r.id, user_id: r.user_id, content: r.content, image_path: r.image_path, image_url: publicUrl(r.image_path), is_sample: !!r.is_sample,
         ai_diagram: r.ai_diagram || null, ai_diagram_status: r.ai_diagram_status || null,
+        ai_score: r.ai_score ?? null, ai_review: r.ai_review || null, ai_review_status: r.ai_review_status || null,
         created_at: r.created_at, author: r.author || { id: r.user_id, nickname: '알 수 없음' },
         like_count: r.likes?.[0]?.count ?? 0, comment_count: r.comments?.[0]?.count ?? 0, liked: liked.has(r.id),
       }));
@@ -203,6 +204,15 @@ async function createSupabaseApi(onAuthChange) {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw Object.assign(new Error(data.error || 'AI 평가를 받지 못했어요. 잠시 뒤 다시 시도해 주세요.'), { status: r.status });
+      return data;
+    },
+    // 올라온 글을 AI 가 채점한다 (/api/review 에 postId). 결과는 서버가 저장하므로 로그인이 필요 없다.
+    // 돌려주는 값: { status: 'done', score, review } | { status: 'pending' | 'failed' }
+    async scorePost(postId) {
+      const r = await fetch('/api/review', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ postId }) });
+      const data = await r.json().catch(() => ({}));
+      if (r.status === 202) return data;
+      if (!r.ok) throw Object.assign(new Error(data.error || '점수를 매기지 못했어요.'), { status: r.status });
       return data;
     },
     // 다이어그램 없는 글에 AI 가 그림을 그린다 (/api/diagram). 결과는 서버가 저장하므로 로그인이 필요 없다.
@@ -409,6 +419,22 @@ function aggregateMetrics(events, days) {
   return { days, today, daily, endpoints, range: { visitors: new Set(views.map((e) => e.visitor_id)).size, views: views.length } };
 }
 
+// 데모용 AI 점수: 적은 단락과 분량으로 점수를 정한다 (api/review.js 와 같은 모양)
+function demoReview(p) {
+  const has = (re) => re.test(p.content);
+  const base = Math.min(3, Math.floor(meaningful(p.content).length / 120));
+  const c = (name, bonus, comment) => ({ name, score: Math.min(10, 4 + base + bonus), comment });
+  const criteria = [
+    c('요구사항 이해', has(/요구사항|가정/) ? 2 : 0, '데모 점수예요. 문제의 조건을 얼마나 짚었는지 봐요.'),
+    c('구성 요소 선택', has(/구성 요소|Redis|MySQL|Kafka/i) ? 2 : 0, '데모 점수예요. 규모에 맞는 구성인지 봐요.'),
+    c('트레이드오프 판단', has(/포기/) ? 3 : 0, '데모 점수예요. 포기한 것을 적었는지 봐요.'),
+    c('병목과 확장성', has(/병목|경합|피크|확장/) ? 2 : 0, '데모 점수예요. 먼저 터질 곳을 봤는지 봐요.'),
+    c('설명의 명확성', p.image_url ? 2 : 1, '데모 점수예요. 글과 그림만으로 이해되는지 봐요.'),
+  ];
+  const score = Math.round(criteria.reduce((a, x) => a + x.score, 0) * 2);
+  return { score, summary: '데모 모드라 실제 AI 대신 글의 단락과 분량으로 매긴 점수예요.', criteria, strengths: [], improvements: [] };
+}
+
 // 데모용 AI 아키텍처: 글에 나온 구성 요소를 찾아 종류별 열에 놓고 흐름대로 잇는다
 const DEMO_WORDS = {
   client: /클라이언트|사용자|앱/, cdn: /CDN/i, lb: /로드 ?밸런서|LB\b/i, gateway: /게이트웨이/, api: /API|서버/i,
@@ -557,6 +583,19 @@ function createDemoApi() {
     // 댓글을 지우면 달린 답글도 함께 지운다 (Supabase 의 on delete cascade 와 같게)
     async deleteComment(id) { db.comments = db.comments.filter((c) => c.id !== id && c.parent_id !== id); save(); },
     async review() { throw new Error('AI 평가는 데모 모드에서는 쓸 수 없어요.'); },
+    // 데모에서는 Claude 대신 글 길이와 단락으로 그럴듯한 점수를 만든다
+    async scorePost(postId) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const p = db.posts.find((x) => x.id === postId);
+      if (!p) throw new Error('글을 찾지 못했어요.');
+      if (!p.ai_review) {
+        p.ai_review = demoReview(p);
+        p.ai_score = p.ai_review.score;
+        p.ai_review_status = 'done';
+        save();
+      }
+      return { status: 'done', score: p.ai_score, review: p.ai_review };
+    },
     // 데모에서는 Claude 대신 글에 나온 구성 요소 이름으로 간단히 그린다
     async drawDiagram(postId) {
       await new Promise((r) => setTimeout(r, 1500));
@@ -621,6 +660,7 @@ const state = {
   posts: [],
   sort: 'top',            // top | new
   expanded: new Set(),    // 펼친 본문
+  openScores: new Set(),  // 세부 점수를 펼친 글
   openComments: new Set(),
   comments: {},           // postId -> comment[]
   replyTo: null,          // 답글 입력 중인 자리: { postId, rootId, nick }
@@ -682,52 +722,78 @@ async function refreshPosts() {
   state.posts = await api.listPosts(state.topicId);
   for (const id of state.openComments) state.comments[id] = await api.listComments(id);
   drawMissingDiagrams();
+  aiScore.fill();
 }
 
-/* ---------- AI 아키텍처 ---------- */
-// 다이어그램 없이 글만 있는 답안은 백그라운드에서 AI 에게 그림을 부탁하고, 오는 대로 그 글만 다시 그린다.
-// 그림은 서버에 저장되므로 글마다 처음 본 한 사람만 기다리고, 그다음부터는 바로 보인다.
-const aiDraw = { running: new Set(), queue: [], tries: {}, off: false, MAX: 2, RETRY_MS: 15000, TRIES: 5 };
-const needsDiagram = (p) => !p.image_url && !p.ai_diagram && p.ai_diagram_status !== 'failed' && !!meaningful(p.content || '');
-const isDrawing = (p) => needsDiagram(p) && !aiDraw.off && (aiDraw.running.has(p.id) || aiDraw.queue.includes(p.id) || p.ai_diagram_status === 'pending');
+/* ---------- AI 백그라운드 작업 (그림, 점수) ---------- */
+// 글마다 한 번 서버에서 만들어 저장하는 AI 결과를 동시 MAX 개씩 부탁하고, 오는 대로 그 글만 다시 그린다.
+// 결과는 서버에 저장되므로 글마다 처음 본 한 사람만 기다리고, 그다음부터는 바로 보인다.
+// needs(p): 아직 결과가 없는 글인지 / status(p): 서버 상태 / call(id): api 호출 / apply(p, r): 'done' 결과 반영
+function aiJob({ needs, status, call, apply, fail }) {
+  const job = { running: new Set(), queue: [], tries: {}, off: false, MAX: 2, RETRY_MS: 15000, TRIES: 5 };
+  job.busy = (p) => needs(p) && !job.off && (job.running.has(p.id) || job.queue.includes(p.id) || status(p) === 'pending');
+  job.fill = () => {
+    if (job.off) return;
+    for (const p of state.posts) {
+      if (needs(p) && !job.running.has(p.id) && !job.queue.includes(p.id) && (job.tries[p.id] || 0) < job.TRIES) job.queue.push(p.id);
+    }
+    pump();
+  };
+  const pump = () => { while (!job.off && job.running.size < job.MAX && job.queue.length) run(job.queue.shift()); };
+  async function run(id) {
+    job.running.add(id);
+    job.tries[id] = (job.tries[id] || 0) + 1;
+    let retry = false;
+    try {
+      const r = await call(id);
+      const p = state.posts.find((x) => x.id === id);
+      if (p && r.status === 'done') apply(p, r);
+      else if (p && r.status === 'failed') fail(p);
+      retry = r.status === 'pending';  // 다른 사람이 맡아 하는 중이면 잠시 뒤 결과를 받으러 다시 온다
+    } catch (e) {
+      // 서버 설정 전(503)이나 DB 변경 전이면 이번 방문 동안은 더 부르지 않는다
+      if (e.status === 503 || e.status === 500 || e.status === 400) job.off = true;
+      else retry = true;
+    }
+    job.running.delete(id);
+    if (retry && job.tries[id] < job.TRIES) setTimeout(() => { if (state.posts.some((p) => p.id === id)) job.fill(); }, job.RETRY_MS);
+    else if (retry) { const p = state.posts.find((x) => x.id === id); if (p) fail(p); }
+    rerenderPost(id);
+    pump();
+  }
+  return job;
+}
 
-function drawMissingDiagrams() {
-  if (aiDraw.off) return;
-  for (const p of state.posts) {
-    if (needsDiagram(p) && !aiDraw.running.has(p.id) && !aiDraw.queue.includes(p.id) && (aiDraw.tries[p.id] || 0) < aiDraw.TRIES) aiDraw.queue.push(p.id);
-  }
-  pumpDiagrams();
-}
-function pumpDiagrams() {
-  while (!aiDraw.off && aiDraw.running.size < aiDraw.MAX && aiDraw.queue.length) drawDiagram(aiDraw.queue.shift());
-}
-async function drawDiagram(id) {
-  aiDraw.running.add(id);
-  aiDraw.tries[id] = (aiDraw.tries[id] || 0) + 1;
-  let retry = false;
-  try {
-    const r = await api.drawDiagram(id);
-    const p = state.posts.find((x) => x.id === id);
-    if (p && r.status === 'done') { p.ai_diagram = r.diagram; p.ai_diagram_status = 'done'; }
-    else if (p && r.status === 'failed') p.ai_diagram_status = 'failed';
-    retry = r.status === 'pending';  // 다른 사람이 그리는 중이면 잠시 뒤 결과를 받으러 다시 온다
-  } catch (e) {
-    // 서버 설정 전(503)이나 DB 변경 전이면 이번 방문 동안은 더 부르지 않는다
-    if (e.status === 503 || e.status === 500 || e.status === 400) aiDraw.off = true;
-    else retry = true;
-  }
-  aiDraw.running.delete(id);
-  if (retry && aiDraw.tries[id] < aiDraw.TRIES) setTimeout(() => { if (state.posts.some((p) => p.id === id)) drawMissingDiagrams(); }, aiDraw.RETRY_MS);
-  else if (retry) { const p = state.posts.find((x) => x.id === id); if (p) p.ai_diagram_status = 'failed'; }
-  rerenderPost(id);
-  pumpDiagrams();
-}
+// 다이어그램 없이 글만 있는 답안은 AI 에게 그림을 부탁한다
+const aiDraw = aiJob({
+  needs: (p) => !p.image_url && !p.ai_diagram && p.ai_diagram_status !== 'failed' && !!meaningful(p.content || ''),
+  status: (p) => p.ai_diagram_status,
+  call: (id) => api.drawDiagram(id),
+  apply: (p, r) => { p.ai_diagram = r.diagram; p.ai_diagram_status = 'done'; },
+  fail: (p) => { p.ai_diagram_status = 'failed'; },
+});
+const isDrawing = aiDraw.busy;
+const drawMissingDiagrams = aiDraw.fill;
+
+// 올라온 글마다 AI 가 한 번 채점한다. 예시 답안은 채점하지 않는다.
+const aiScore = aiJob({
+  needs: (p) => !p.is_sample && p.ai_score == null && p.ai_review_status !== 'failed' && !!meaningful(p.content || ''),
+  status: (p) => p.ai_review_status,
+  call: (id) => api.scorePost(id),
+  apply: (p, r) => { p.ai_score = r.score; p.ai_review = r.review; p.ai_review_status = 'done'; },
+  fail: (p) => { p.ai_review_status = 'failed'; },
+});
+
 // 입력 중인 글이나 스크롤이 날아가지 않게 해당 글의 그림 자리만 바꾼다
 function rerenderPost(id) {
-  const slot = document.querySelector(`#post-${CSS.escape(String(id))} .post-fig`);
+  const box = document.getElementById(`post-${id}`);
   const p = state.posts.find((x) => x.id === id);
-  if (slot && p) slot.outerHTML = postFigHtml(p);
+  if (!box || !p) return;
+  box.querySelector('.post-fig')?.replaceWith(htmlNode(postFigHtml(p)));
+  box.querySelector('.post-score')?.replaceWith(htmlNode(postScoreHtml(p)));
+  box.querySelector('.score-detail')?.replaceWith(htmlNode(scoreDetailHtml(p)));
 }
+const htmlNode = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; };
 
 /* ---------- header ---------- */
 function renderChrome() {
@@ -815,7 +881,7 @@ function reviewHtml() {
   const loading = !!r?.loading;
   const head = `
     <div class="ai-head">
-      <div class="ai-title"><b>AI 평가</b><span>올리기 전에 점수와 피드백을 받아볼 수 있어요. 결과는 나에게만 보여요.</span></div>
+      <div class="ai-title"><b>AI 평가</b><span>올리기 전에 점수와 피드백을 받아볼 수 있어요. 이 결과는 나에게만 보이고, 올린 글에는 AI 점수가 따로 매겨져요.</span></div>
       <button class="btn small" type="button" data-act="ai-review" ${loading || state.busy ? 'disabled' : ''}>${loading ? '평가하는 중…' : r?.result ? '다시 평가받기' : 'AI 평가 받기'}</button>
     </div>`;
   let body = '';
@@ -1574,6 +1640,29 @@ function postFigHtml(p) {
   return '<div class="post-fig"></div>';
 }
 
+// AI 점수 배지와 펼친 세부 점수. rerenderPost 가 바꿔 끼울 수 있게 비어 있어도 자리는 남긴다.
+function postScoreHtml(p) {
+  if (p.ai_score != null) {
+    return `<button class="post-score" type="button" data-act="toggle-score" data-id="${p.id}" aria-expanded="${state.openScores.has(p.id)}" aria-label="AI 점수 ${p.ai_score}점, 세부 점수 보기">AI <b class="mono">${p.ai_score}</b>점</button>`;
+  }
+  if (aiScore.busy(p)) return '<span class="post-score wait" role="status"><span class="spinner" aria-hidden="true"></span>AI 채점 중</span>';
+  return '<span class="post-score" hidden></span>';
+}
+function scoreDetailHtml(p) {
+  const x = p.ai_review;
+  if (!x || p.ai_score == null || !state.openScores.has(p.id)) return '<div class="score-detail" hidden></div>';
+  return `<div class="score-detail">
+    <p class="score-sum">${esc(x.summary || '')}</p>
+    <div class="ai-criteria">${(x.criteria || []).map((c) => `
+      <div class="ai-crit">
+        <div class="ai-crit-head"><span>${esc(c.name)}</span><b class="mono">${Number(c.score) || 0}<small>/10</small></b></div>
+        <div class="ai-bar" aria-hidden="true"><i style="width:${(Number(c.score) || 0) * 10}%"></i></div>
+        <p>${esc(c.comment || '')}</p>
+      </div>`).join('')}</div>
+    <p class="ai-fig-note"><span class="chip ai">AI</span>AI가 매긴 참고용 점수예요. 정답은 하나가 아니에요.</p>
+  </div>`;
+}
+
 function postHtml(p, rank) {
   const mine = state.me && state.me.id === p.user_id && !p.is_sample;
   const canDelete = state.me && (mine || state.me.isAdmin);
@@ -1585,9 +1674,11 @@ function postHtml(p, rank) {
       <div class="meta"><b>${p.is_sample ? '하루설계 운영진 <span class="chip sample">예시 답안</span>' : esc(p.author.nickname) + (mine ? ' (나)' : '')}</b><span>${ago(p.created_at)}</span></div>
       <div class="tools">
         ${state.sort === 'top' && rank <= 3 && p.like_count > 0 ? `<span class="rank">#${rank}</span>` : ''}
+        ${postScoreHtml(p)}
         ${canDelete ? `<button class="btn ghost small danger" type="button" data-act="del-post" data-id="${p.id}">삭제</button>` : ''}
       </div>
     </div>
+    ${scoreDetailHtml(p)}
     ${postFigHtml(p)}
     <div class="post-body ${long ? 'clamped' : ''}">${contentHtml(p.content)}</div>
     ${long ? `<button class="more" type="button" data-act="expand" data-id="${p.id}">더 보기</button>` : ''}
@@ -2395,6 +2486,11 @@ document.addEventListener('click', async (ev) => {
   if (act === 'cancel-compose' || (act === 'backdrop-compose' && ev.target === el)) { if (state.busy) return; state.composing = false; return render(); }
   if (act === 'backdrop-compose') return;
   if (act === 'zoom') return openLightbox(el.dataset.src);
+  if (act === 'toggle-score') {
+    const id = Number(el.dataset.id) || el.dataset.id;
+    if (!state.openScores.delete(id)) state.openScores.add(id);
+    return rerenderPost(id);
+  }
   if (act === 'expand') { state.expanded.add(Number(el.dataset.id) || el.dataset.id); return render(); }
   if (act === 'remove-image') {
     state.draft = $('#post-content')?.value ?? state.draft;
