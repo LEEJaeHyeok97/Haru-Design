@@ -15,7 +15,7 @@
 - **AI 아키텍처**: 다이어그램 없이 글만 올린 답안은 백그라운드에서 Claude가 글을 읽고 캔버스 형식의 그림을 그려 붙임. 글마다 한 번만 만들어 DB에 저장하고 'AI' 표시와 함께 보여줌
 - **좋아요, 댓글, 대댓글**(한 단계), 인기순/최신순 정렬
 - **닉네임만으로 참여**: 가입 없이 Supabase 익명 로그인. 관리자는 이메일/비밀번호
-- **이메일 구독**: 상단 공지에서 이메일을 남기면 관리자 페이지에 목록으로 보임 (발송 기능은 아직 없음)
+- **이메일 구독**: 상단 공지에서 이메일을 남기면 매일 오전 9시(KST)에 그날 문제를 Gmail로 보냄 (Vercel Cron). 메일마다 구독 취소 링크와 Gmail 원클릭 구독 취소. 관리자 페이지에서 구독자 목록, 마지막 발송 결과, 테스트 메일 받기
 - **스폰서 칸**: 넓은 화면은 본문 오른쪽에 고정, 좁은 화면은 본문 아래. 관리자가 등록한 광고(제목·설명·링크·이미지) 중 켜진 것을 정한 순서대로 모두 보여주고, 없으면 광고 문의 안내. 이미지는 광고마다 비율(원본/가로형/4:3/정사각)·맞춤(꽉 채우기/전체 보이기)·보일 위치를 정할 수 있음. 클릭 수는 운영 지표에 광고별로 집계
 - **관리자 페이지**: 문제 등록·예약, 구독자 목록(복사·삭제), 스폰서 광고 관리, 운영 지표, 요청 모니터링(24시간·7일·30일 시간대별 요청 수를 종류별 막대로, 종류 거르기, 최근 요청 로그·실패만 보기) (일간 방문자, 페이지뷰, 요청별 횟수·실패·평균 응답 시간, 7/14/30일)
 
@@ -27,6 +27,8 @@ styles.css     스타일
 app.js         앱 로직 전부 (Supabase API, 데모 모드, 캔버스, 렌더링, 이벤트)
 api/review.js  AI 평가 서버 함수 (Vercel Function, @anthropic-ai/sdk)
 api/diagram.js AI 아키텍처 서버 함수 (글 → 다이어그램, 결과를 posts에 저장)
+api/newsletter.js 매일 문제 메일 발송 (Vercel Cron, Gmail SMTP), ?preview 로 오늘 메일 미리 보기
+api/unsubscribe.js 메일의 구독 취소 링크
 supabase/      DB 변경 SQL (Supabase SQL Editor에서 직접 실행)
 vercel.json    헤더, cleanUrls, 함수 실행 시간(60초)
 ```
@@ -48,12 +50,16 @@ npx serve .
 | Supabase URL, anon key | `app.js` 맨 위 `CONFIG` (공개 키, 접근 제어는 RLS) |
 | `ANTHROPIC_API_KEY` | Vercel > Project > Settings > Environment Variables. 바꾼 뒤에는 Redeploy |
 | `SUPABASE_SERVICE_ROLE_KEY` | 같은 곳. AI 아키텍처 저장용 (Supabase > Project Settings > API Keys의 service_role). 브라우저 코드에 넣지 말 것 |
+| `GMAIL_USER`, `GMAIL_APP_PASSWORD` | 같은 곳. 문제 메일을 보낼 Gmail 주소와 앱 비밀번호 (Google 계정 > 보안 > 2단계 인증을 켠 뒤 myaccount.google.com/apppasswords 에서 발급). 개인 Gmail은 하루 약 500통까지 |
+| `CRON_SECRET` | 같은 곳. 아무 긴 임의 문자열. Vercel Cron 이 이 값으로 `/api/newsletter`를 부른다 |
 | AI 사용 한도 | [Anthropic Console](https://console.anthropic.com) > Limits |
 
 ## DB 변경
 
 `supabase/` 안의 SQL은 자동 적용되지 않습니다. Supabase 대시보드 > SQL Editor에서 직접 실행하세요.
 
+- `2026-10-28-newsletter.sql`: 문제 메일 발송 기록 `newsletter_sends`(문제마다 한 번만 보내기, 관리자만 보기)
+- `2026-10-26-ai-score.sql`: 올라온 글의 AI 점수 `posts.ai_score`·`ai_review` 컬럼과 보호 트리거
 - `2026-10-25-comment-replies.sql`: 대댓글용 `comments.parent_id` 컬럼과 검사 트리거
 - `2026-10-25-ai-diagram.sql`: AI 아키텍처용 `posts.ai_diagram`·`ai_diagram_status`·`ai_diagram_at` 컬럼과, 일반 사용자가 이 컬럼을 못 쓰게 막는 트리거
 - `2026-10-25-subscribers.sql`: 이메일 구독 `subscribers` 테이블(남기기는 누구나, 보기·삭제는 관리자만)과 `events.type`에 `subscribe` 추가

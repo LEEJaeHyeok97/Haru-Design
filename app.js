@@ -234,6 +234,18 @@ async function createSupabaseApi(onAuthChange) {
     },
     async listSubscribers() { return must(await sb.from('subscribers').select('*').order('created_at', { ascending: false })); },
     async deleteSubscriber(id) { must(await sb.from('subscribers').delete().eq('id', id)); },
+    // 매일 문제 메일 (api/newsletter.js, supabase/2026-10-28-newsletter.sql)
+    async lastNewsletter() {
+      const { data, error } = await sb.from('newsletter_sends').select('*').order('started_at', { ascending: false }).limit(1);
+      return error ? null : data[0] || null;
+    },
+    async sendTestMail() {
+      const token = (await sb.auth.getSession()).data.session?.access_token;
+      const r = await fetch('/api/newsletter', { method: 'POST', headers: { Authorization: `Bearer ${token || ''}` } });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw Object.assign(new Error(data.error || '테스트 메일을 보내지 못했어요.'), { status: r.status });
+      return data;
+    },
 
     // 스폰서 칸 (supabase/2026-10-25-sponsors.sql). 켜진 것은 누구나, 전체와 등록·수정은 관리자만.
     async listSponsors() {
@@ -638,6 +650,8 @@ function createDemoApi() {
     },
     async listSubscribers() { needAdmin(); await wait(); return [...(db.subscribers || [])].sort((a, b) => b.created_at.localeCompare(a.created_at)); },
     async deleteSubscriber(id) { needAdmin(); db.subscribers = (db.subscribers || []).filter((s) => s.id !== id); save(); },
+    async lastNewsletter() { return null; },
+    async sendTestMail() { throw new Error('메일 발송은 데모 모드에서는 쓸 수 없어요.'); },
 
     async track(row) {
       db.events = (db.events || []).concat({ ...row, created_at: new Date().toISOString() }).slice(-3000);
@@ -2027,7 +2041,7 @@ function renderSubscribers() {
 async function loadSubscribers() {
   state.subscribers = { ...(state.subscribers || {}), loading: true, error: null };
   renderSubscribers();
-  try { state.subscribers = { list: await api.listSubscribers() }; }
+  try { const [list, last] = await Promise.all([api.listSubscribers(), api.lastNewsletter()]); state.subscribers = { list, last }; }
   catch (e) {
     const m = (e && e.message) || '';
     state.subscribers = { error: /subscribers|schema cache|does not exist/i.test(m)
@@ -2036,10 +2050,19 @@ async function loadSubscribers() {
   }
   renderSubscribers();
 }
+// 매일 오전 9시 문제 메일의 마지막 발송 결과
+function newsletterHtml(last) {
+  const base = '매일 오전 9시에 그날 문제를 구독자에게 메일로 보내요.';
+  if (!last) return `<p class="hint">${base}</p>`;
+  const when = `${fmtDate(kstDate(new Date(last.started_at)))} ${new Date(last.started_at).toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour: 'numeric', minute: '2-digit' })}`;
+  const result = !last.finished_at ? '보내는 중이에요' : `${fmtNum(last.sent)}명에게 보냈어요${last.failed ? ` · 실패 ${fmtNum(last.failed)}명` : ''}`;
+  return `<p class="hint">${base} 마지막 발송: ${esc(when)}, ${result}</p>${last.error ? `<p class="err">${esc(last.error)}</p>` : ''}`;
+}
 function subscribersHtml() {
   const s = state.subscribers || { loading: true };
   const list = s.list || [];
   const head = `<div class="metrics-head"><h2>이메일 구독자 ${s.list ? `<span class="mono sub-count">${fmtNum(list.length)}명</span>` : ''}</h2>
+    <button class="btn ghost small" type="button" data-act="test-mail" ${state.busy ? 'disabled' : ''}>테스트 메일 받기</button>
     ${list.length ? '<button class="btn ghost small" type="button" data-act="copy-subscribers">주소 모두 복사</button>' : ''}
     <button class="btn ghost small" type="button" data-act="subscribers-refresh" ${s.loading ? 'disabled' : ''}>${s.loading ? '불러오는 중…' : '새로고침'}</button></div>`;
   let body;
@@ -2049,7 +2072,7 @@ function subscribersHtml() {
   else body = `<ul class="sub-list">${list.map((x) => `
       <li><span class="sub-email">${esc(x.email)}</span><time datetime="${esc(x.created_at)}">${fmtDate(kstDate(new Date(x.created_at)))}</time>
         <button class="btn ghost small danger" type="button" data-act="del-subscriber" data-id="${x.id}">삭제</button></li>`).join('')}</ul>`;
-  return `<section class="panel subscribers">${head}${body}</section>`;
+  return `<section class="panel subscribers">${head}${newsletterHtml(s.last)}${body}</section>`;
 }
 
 /* ---------- 관리자: 요청 모니터링 (시간대별) ---------- */
@@ -2469,6 +2492,13 @@ document.addEventListener('click', async (ev) => {
     const s = state.sponsors.find((x) => String(x.id) === el.dataset.id);
     try { await api.deleteSponsor(s); if (state.editingSponsor?.id === s.id) resetSponsorForm(); await refreshSponsors(); render(); toast('광고를 삭제했어요'); }
     catch (e) { toast(friendlyError(e)); }
+    return;
+  }
+  if (act === 'test-mail') {
+    state.busy = true; renderSubscribers();
+    try { const r = await api.sendTestMail(); toast(`${r.to}(으)로 오늘 문제 메일을 보냈어요`); }
+    catch (e) { toast(friendlyError(e)); }
+    state.busy = false; renderSubscribers();
     return;
   }
   if (act === 'copy-subscribers') {

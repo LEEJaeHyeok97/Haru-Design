@@ -3,8 +3,12 @@
   "cleanUrls": true,
   "functions": {
     "api/review.js": { "maxDuration": 60 },
-    "api/diagram.js": { "maxDuration": 60 }
+    "api/diagram.js": { "maxDuration": 60 },
+    "api/newsletter.js": { "maxDuration": 60 }
   },
+  "crons": [
+    { "path": "/api/newsletter", "schedule": "0 0 * * *" }
+  ],
   "headers": [
     {
       "source": "/(.*)",

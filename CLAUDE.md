@@ -14,11 +14,12 @@
 
 ## 백엔드
 
-- Supabase 프로젝트 `kqgxhfdwngmxyrkceprm`. 테이블: `topics`, `posts`, `likes`, `comments`(`parent_id`로 대댓글 한 단계), `profiles`, `events`(이용 기록, insert만 공개), `subscribers`(이메일 구독, insert만 공개·select/delete는 `is_admin()`), `sponsors`(스폰서 광고, `active`인 것만 공개).  `events.type` 최신 목록은 `supabase/2026-10-25-sponsors.sql`에 있다. RPC `is_admin`, `admin_metrics(days)`, `admin_timeline(hours)`. Storage 버킷 `designs`.
+- Supabase 프로젝트 `kqgxhfdwngmxyrkceprm`. 테이블: `topics`, `posts`, `likes`, `comments`(`parent_id`로 대댓글 한 단계), `profiles`, `events`(이용 기록, insert만 공개), `subscribers`(이메일 구독, insert만 공개·select/delete는 `is_admin()`), `sponsors`(스폰서 광고, `active`인 것만 공개), `newsletter_sends`(문제 메일 발송 기록, select는 `is_admin()`).  `events.type` 최신 목록은 `supabase/2026-10-25-sponsors.sql`에 있다. RPC `is_admin`, `admin_metrics(days)`, `admin_timeline(hours)`. Storage 버킷 `designs`.
 - 새 사용자 동작을 지표에 넣으려면 `track(type, path)`를 부르고, `events.type` check 제약(SQL)과 `ENDPOINTS` 라벨(app.js)을 같이 늘린다. 요청 모니터링 그래프에도 보이려면 `TL_SERIES`에 색과 함께 추가한다.
 - 스키마 SQL은 레포에 없다. DB 변경은 `supabase/날짜-이름.sql`로 만들고 사용자에게 SQL Editor에서 실행해 달라고 한다 (Claude가 직접 실행할 수 없음). 컬럼이 아직 없어도 깨지지 않게 조회는 `select('*')` 쪽을 선호.
 - 읽기 확인은 anon key로 REST 조회 가능: `curl "$URL/rest/v1/comments?select=*&limit=1" -H "apikey: $KEY"`. 운영 DB에 쓰기 요청은 보내지 말 것.
 - `api/diagram.js`: 그림 없는 글을 Claude(effort low)로 캔버스 형식 그림(`{nodes, edges}`)으로 바꿔 `posts.ai_diagram`에 저장. service_role 키(`SUPABASE_SERVICE_ROLE_KEY`)로 쓰며, `ai_diagram_status`를 `pending`으로 먼저 바꾼 요청만 Claude를 부른다. 프런트는 `refreshPosts()` 뒤 `drawMissingDiagrams()`가 동시 2개씩 요청하고 `rerenderPost()`로 그림 자리만 바꾼다. 서버의 `TYPES`는 `DG_TYPES`와 맞춰 둘 것.
+- `api/newsletter.js`: Vercel Cron(`0 0 * * *` UTC = 오전 9시 KST)이 GET으로 불러 오늘 문제를 구독자에게 Gmail SMTP(`node:tls`로 직접, 의존성 없음)로 보낸다. `newsletter_sends`에 먼저 넣은 요청만 보낸다. POST는 관리자 테스트 발송, `?preview`는 미리 보기. 구독 취소 서명은 `api/unsubscribe.js`와 같은 HMAC(service_role 키).
 - `api/review.js`: Supabase 토큰 확인 후 Claude(`claude-opus-5-5`, effort medium, json_schema 구조화 출력, `fallbacks: "default"`)로 평가. 키는 Vercel 환경 변수 `ANTHROPIC_API_KEY`. `{ postId }`로 부르면 올라온 글을 채점해 `posts.ai_score`/`ai_review`에 저장한다 (`api/diagram.js`와 같은 pending 선점 방식, service_role 키 필요). 프런트는 `aiJob()` 큐(`aiDraw`, `aiScore`)로 부른다.
 
 ## 확인 방법
