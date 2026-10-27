@@ -58,6 +58,7 @@ npx serve .
 
 `supabase/` 안의 SQL은 자동 적용되지 않습니다. Supabase 대시보드 > SQL Editor에서 직접 실행하세요.
 
+- `2026-10-28-subscriber-count.sql`: 상단 구독 공지에 보이는 구독자 수 함수 `subscriber_count()`(숫자만 공개)
 - `2026-10-28-newsletter.sql`: 문제 메일 발송 기록 `newsletter_sends`(문제마다 한 번만 보내기, 관리자만 보기)
 - `2026-10-26-ai-score.sql`: 올라온 글의 AI 점수 `posts.ai_score`·`ai_review` 컬럼과 보호 트리거
 - `2026-10-25-comment-replies.sql`: 대댓글용 `comments.parent_id` 컬럼과 검사 트리거

@@ -19,6 +19,8 @@ const MOVED = !/(\.vercel\.app|^localhost|^127\.0\.0\.1)$/.test(location.hostnam
 // 상단 공지: 매일 문제 이메일 구독. 닫거나 구독하면 이 브라우저에서는 다시 띄우지 않는다.
 const NOTICE_KEY = 'harusolgye-notice-subscribe';
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+// 구독자가 이보다 적으면 숫자를 보여주지 않는다 (적은 숫자는 오히려 망설이게 한다)
+const SUB_COUNT_MIN = 10;
 let noticeClosed = false;
 try { noticeClosed = localStorage.getItem(NOTICE_KEY) === '1'; } catch { /* 저장소를 못 쓰면 매번 보여준다 */ }
 
@@ -231,6 +233,11 @@ async function createSupabaseApi(onAuthChange) {
       if (error?.code === '23505') return { already: true };
       if (error) throw error;
       return { already: false };
+    },
+    // 이메일은 감추고 숫자만 (supabase/2026-10-28-subscriber-count.sql). 함수가 아직 없으면 null.
+    async subscriberCount() {
+      const { data, error } = await sb.rpc('subscriber_count');
+      return error ? null : data;
     },
     async listSubscribers() { return must(await sb.from('subscribers').select('*').order('created_at', { ascending: false })); },
     async deleteSubscriber(id) { must(await sb.from('subscribers').delete().eq('id', id)); },
@@ -648,6 +655,7 @@ function createDemoApi() {
       save();
       return { already: false };
     },
+    async subscriberCount() { return 128 + (db.subscribers || []).length; },
     async listSubscribers() { needAdmin(); await wait(); return [...(db.subscribers || [])].sort((a, b) => b.created_at.localeCompare(a.created_at)); },
     async deleteSubscriber(id) { needAdmin(); db.subscribers = (db.subscribers || []).filter((s) => s.id !== id); save(); },
     async lastNewsletter() { return null; },
@@ -692,6 +700,7 @@ const state = {
   timeline: null,         // 관리자 요청 모니터링: { hours, data, loading, error, only, failOnly }
   subEmail: '',           // 상단 공지에 쓰던 이메일
   subDone: false,         // 방금 구독함 (이번 방문 동안 고마움 표시)
+  subCount: null,         // 구독자 수 (상단 공지에 표시)
   subscribers: null,      // 관리자: { list, loading, error }
   sponsors: [],           // 켜진 스폰서 (관리자는 전부), sort_order 순
   editingSponsor: null,   // 관리자: 수정 중인 스폰서
@@ -828,7 +837,7 @@ function renderChrome() {
     : noticeClosed || state.me?.isAdmin ? ''
     : `<div class="notice subscribe" role="region" aria-label="이메일 구독"><span class="chip">NEW</span><div class="notice-body"><strong>매일 올라오는 설계 문제를 이메일로 받고 싶다면 이메일을 남겨주세요!</strong>
         <form class="sub-form" id="sub-form"><input type="email" id="sub-email" required maxlength="254" placeholder="name@example.com" autocomplete="email" aria-label="이메일" value="${esc(state.subEmail)}"><button class="btn small primary" type="submit">받아보기</button></form>
-        <span class="sub-note">문제 발송에만 써요.</span></div><button class="btn ghost small" type="button" data-act="dismiss-notice" aria-label="공지 닫기">✕</button></div>`;
+        <span class="sub-note">${state.subCount >= SUB_COUNT_MIN ? `지금 <b>${fmtNum(state.subCount)}명</b>이 매일 아침 이메일로 설계 문제를 받고 있어요 · ` : ''}문제 발송에만 써요.</span></div><button class="btn ghost small" type="button" data-act="dismiss-notice" aria-label="공지 닫기">✕</button></div>`;
   // 이메일을 쓰는 중에 화면이 다시 그려져도 입력 위치를 지킨다
   const typingEmail = document.activeElement?.id === 'sub-email';
   $('#banner').innerHTML = moved + notice + (DEMO
@@ -2763,6 +2772,7 @@ document.addEventListener('focusout', (ev) => { if (ev.target.matches?.('.chart 
     api = DEMO ? createDemoApi() : await createSupabaseApi(() => afterAuthChange());
     await refreshMe();
     refreshSponsors().then(renderRail);
+    if (!noticeClosed) api.subscriberCount().then((n) => { state.subCount = n; renderChrome(); }).catch(() => {});
     const hash = location.hash.replace('#', '');
     if (hash === 'admin' || hash === 'archive') { await refreshTopics(); go(hash); }
     else await openToday();
