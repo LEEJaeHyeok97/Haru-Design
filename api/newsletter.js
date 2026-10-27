@@ -238,7 +238,7 @@ async function smtpConnect() {
 
 function mailFor(topic, to) {
   const unsubscribe = unsubUrl(to);
-  return buildMessage({ to, subject: `[하루설계] ${topic.title}`, html: mailHtml(topic, unsubscribe), text: mailText(topic, unsubscribe), unsubscribe });
+  return buildMessage({ to, subject: '[하루설계] 오늘 설계 문제를 보내드려요.', html: mailHtml(topic, unsubscribe), text: mailText(topic, unsubscribe), unsubscribe });
 }
 
 async function todayTopic() {
