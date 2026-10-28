@@ -523,8 +523,8 @@ a.sponsor:hover { box-shadow: var(--shadow-lg); transform: translateY(-1px); }
 .sponsor.house .btn { justify-self: start; margin-top: 4px; text-decoration: none; }
 @media (min-width: 1200px) {
   #rail {
-    position: fixed; top: 88px; left: calc(50% + 320px + 32px); width: 240px;
-    grid-template-columns: 1fr; max-height: calc(100vh - 108px); overflow-y: auto; scrollbar-width: none;
+    position: fixed; top: calc(var(--topbar-h, 56px) + 32px); left: calc(50% + 320px + 32px); width: 240px;
+    grid-template-columns: 1fr; max-height: calc(100vh - var(--topbar-h, 56px) - 52px); overflow-y: auto; scrollbar-width: none;
     padding: 4px 6px 12px; margin: -4px 0 0 -6px;
   }
   #rail::-webkit-scrollbar { display: none; }
@@ -535,8 +535,8 @@ a.sponsor:hover { box-shadow: var(--shadow-lg); transform: translateY(-1px); }
 #feed { display: none; }
 @media (min-width: 1200px) {
   #feed:not([hidden]) {
-    display: block; position: fixed; top: 88px; right: calc(50% + 320px + 32px); width: 240px;
-    max-height: calc(100vh - 108px); overflow-y: auto; scrollbar-width: none;
+    display: block; position: fixed; top: calc(var(--topbar-h, 56px) + 32px); right: calc(50% + 320px + 32px); width: 240px;
+    max-height: calc(100vh - var(--topbar-h, 56px) - 52px); overflow-y: auto; scrollbar-width: none;
   }
   #feed::-webkit-scrollbar { display: none; }
 }
@@ -553,7 +553,6 @@ a.sponsor:hover { box-shadow: var(--shadow-lg); transform: translateY(-1px); }
 .feed-item .what::before {
   content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin: 0 6px 1px 0; vertical-align: middle; background: var(--marker);
 }
-.feed-item.is-like .what::before { background: var(--like); }
 .feed-item.is-post .what::before { background: var(--ok); }
 .feed-item .quote, .feed-item .when { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .feed-item .quote { font-size: var(--text-xs); color: var(--muted); }

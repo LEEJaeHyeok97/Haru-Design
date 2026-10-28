@@ -195,20 +195,18 @@ async function createSupabaseApi(onAuthChange) {
       must(await sb.from('comments').insert({ post_id: postId, content, ...(parentId ? { parent_id: parentId } : {}) }));
     },
     async deleteComment(id) { must(await sb.from('comments').delete().eq('id', id)); },
-    // 왼쪽 '최근 활동' 칸: since 이후의 글, 댓글, 좋아요. 글 본문은 가져오지 않는다.
+    // 왼쪽 '최근 활동' 칸: since 이후의 글과 댓글. 글 본문은 가져오지 않는다.
     async recentActivity({ since, limit }) {
       const nick = (a) => a?.nickname || '알 수 없음';
       const post = 'post:posts!inner(id,topic_id,author:profiles!posts_user_id_fkey(nickname))';
-      const recent = (q, n = limit) => q.gte('created_at', since).order('created_at', { ascending: false }).limit(n);
-      const [posts, comments, likes] = (await Promise.all([
+      const recent = (q) => q.gte('created_at', since).order('created_at', { ascending: false }).limit(limit);
+      const [posts, comments] = (await Promise.all([
         recent(sb.from('posts').select('id,topic_id,created_at,author:profiles!posts_user_id_fkey(nickname)')),
         recent(sb.from('comments').select(`content,created_at,author:profiles!comments_user_id_fkey(nickname),${post}`)),
-        recent(sb.from('likes').select(`created_at,user:profiles(nickname),${post}`), limit * 3),
       ])).map(must);
       return [
         ...posts.map((r) => ({ kind: 'post', at: r.created_at, who: nick(r.author), topic_id: r.topic_id, post_id: r.id })),
         ...comments.map((r) => ({ kind: 'comment', at: r.created_at, who: nick(r.author), owner: nick(r.post.author), topic_id: r.post.topic_id, post_id: r.post.id, text: r.content })),
-        ...likes.map((r) => ({ kind: 'like', at: r.created_at, who: nick(r.user), owner: nick(r.post.author), topic_id: r.post.topic_id, post_id: r.post.id })),
       ];
     },
 
@@ -621,11 +619,9 @@ function createDemoApi() {
       await wait();
       const post = (id) => db.posts.find((p) => p.id === id);
       const about = (p) => ({ owner: user(p.user_id).nickname, topic_id: p.topic_id, post_id: p.id });
-      // 예전 데모 데이터의 좋아요에는 시각이 없어서 뺀다
       return [
         ...db.posts.map((p) => ({ kind: 'post', at: p.created_at, who: user(p.user_id).nickname, topic_id: p.topic_id, post_id: p.id })),
         ...db.comments.filter((c) => post(c.post_id)).map((c) => ({ kind: 'comment', at: c.created_at, who: user(c.user_id).nickname, text: c.content, ...about(post(c.post_id)) })),
-        ...db.likes.filter((l) => l.created_at && post(l.post_id)).map((l) => ({ kind: 'like', at: l.created_at, who: user(l.user_id).nickname, ...about(post(l.post_id)) })),
       ].filter((x) => x.at >= since);
     },
     async review() { throw new Error('AI 평가는 데모 모드에서는 쓸 수 없어요.'); },
@@ -732,7 +728,7 @@ const state = {
   sponsors: [],           // 켜진 스폰서 (관리자는 전부), sort_order 순
   editingSponsor: null,   // 관리자: 수정 중인 스폰서
   sponsorFile: null,      // 관리자: 새로 고른 이미지 { file, url }
-  feed: [],               // 왼쪽 최근 활동 (buildFeed)
+  feed: [],               // 왼쪽 최근 활동 (글, 댓글), 최신순
 };
 
 /* ---------- 이용 기록 (관리자 지표용) ---------- */
@@ -1954,34 +1950,19 @@ function renderRail() {
 }
 
 /* ---------- 최근 활동 칸 ---------- */
-// 넓은 화면에서 본문 왼쪽에 최근 글, 댓글, 좋아요를 보여준다. 답 내용은 빼고 누가 무엇을 했는지만.
-// 같은 글의 좋아요는 한 줄로 묶는다. 활동이 없으면 칸을 숨긴다.
+// 넓은 화면에서 본문 왼쪽에 최근 글과 댓글을 보여준다. 답 내용은 빼고 누가 무엇을 했는지만.
+// 활동이 없으면 칸을 숨긴다.
 const FEED_DAYS = 7, FEED_MAX = 8, FEED_POLL_MS = 90 * 1000;
-function buildFeed(items) {
-  const likes = new Map();  // post_id -> 그 글의 가장 최근 좋아요 줄
-  const out = [];
-  for (const it of [...items].sort((a, b) => b.at.localeCompare(a.at))) {
-    if (it.kind === 'like') {
-      if (likes.has(it.post_id)) { likes.get(it.post_id).others++; continue; }
-      it.others = 0;
-      likes.set(it.post_id, it);
-    }
-    out.push(it);
-  }
-  return out;
-}
 async function refreshFeed() {
   try {
     const since = new Date(Date.now() - FEED_DAYS * 86400000).toISOString();
-    state.feed = buildFeed(await api.recentActivity({ since, limit: 20 }));
+    state.feed = (await api.recentActivity({ since, limit: 20 })).sort((a, b) => b.at.localeCompare(a.at));
   } catch { /* 못 불러오면 보던 목록을 그대로 둔다 */ }
 }
 function feedItemHtml(it, title) {
   const who = `<b>${esc(it.who)}</b>님`;
   const owner = it.owner && it.owner !== it.who ? `<b>${esc(it.owner)}</b>님 글` : '자기 글';
-  const what = it.kind === 'post' ? `${who}이 답을 올렸어요`
-    : it.kind === 'comment' ? `${who}이 ${owner}에 댓글을 달았어요`
-    : `${who}${it.others ? ` 외 ${it.others}명` : ''}이 ${owner}을 좋아해요`;
+  const what = it.kind === 'post' ? `${who}이 답을 올렸어요` : `${who}이 ${owner}에 댓글을 달았어요`;
   return `<button class="feed-item is-${it.kind}" type="button" data-act="feed-open" data-t="${it.topic_id}" data-p="${it.post_id}" data-c="${it.kind === 'comment' ? 1 : ''}">
     <span class="what">${what}</span>
     ${it.kind === 'comment' ? `<span class="quote">${esc(it.text.slice(0, 80))}</span>` : ''}
@@ -2466,7 +2447,7 @@ async function toggleLike(id) {
   p.liked = on; p.like_count += on ? 1 : -1;
   const btn = document.querySelector(`[data-act="like"][data-id="${id}"]`);
   if (btn) btn.outerHTML = likeBtn(p);
-  try { await api.setLike(id, on); track('like', on ? 'on' : 'off'); updateFeed(); }
+  try { await api.setLike(id, on); track('like', on ? 'on' : 'off'); }
   catch (e) { p.liked = !on; p.like_count += on ? -1 : 1; render(); toast(friendlyError(e)); }
 }
 
@@ -2857,6 +2838,10 @@ document.addEventListener('pointerout', (ev) => {
 });
 document.addEventListener('focusin', (ev) => { if (ev.target.matches?.('.chart .col')) showChartTip(ev.target); if (ev.target.matches?.('.tl-col')) showTlTip(ev.target); });
 document.addEventListener('focusout', (ev) => { if (ev.target.matches?.('.chart .col')) hideChartTip(ev.target.parentElement); if (ev.target.matches?.('.tl-col')) hideTlTip(ev.target.parentElement); });
+
+// 상단바가 두 줄로 늘어나도 양옆 칸이 가려지지 않게 높이를 CSS 에 알려준다
+const topbar = $('.topbar');
+if (topbar) new ResizeObserver(() => document.documentElement.style.setProperty('--topbar-h', `${topbar.offsetHeight}px`)).observe(topbar);
 
 /* ---------- boot ---------- */
 (async function boot() {
