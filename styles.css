@@ -530,6 +530,37 @@ a.sponsor:hover { box-shadow: var(--shadow-lg); transform: translateY(-1px); }
   #rail::-webkit-scrollbar { display: none; }
 }
 
+
+/* ---------- 최근 활동 칸 (넓은 화면에서만 본문 왼쪽) ---------- */
+#feed { display: none; }
+@media (min-width: 1200px) {
+  #feed:not([hidden]) {
+    display: block; position: fixed; top: 88px; right: calc(50% + 320px + 32px); width: 240px;
+    max-height: calc(100vh - 108px); overflow-y: auto; scrollbar-width: none;
+  }
+  #feed::-webkit-scrollbar { display: none; }
+}
+.feed { padding: 16px 8px 8px; border-radius: 20px; background: var(--surface); box-shadow: var(--shadow); }
+.feed h2 { margin: 0 8px 6px; font-size: var(--text-sm); font-weight: 700; color: var(--ink); letter-spacing: -.02em; }
+.feed-item {
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 3px; width: 100%; padding: 10px 8px; border: 0; border-radius: 12px;
+  background: none; font: inherit; color: inherit; text-align: left; cursor: pointer; transition: background .15s;
+}
+.feed-item:hover { background: var(--hover); }
+.feed-item:active { background: var(--pressed); }
+.feed-item .what { font-size: var(--text-xs); line-height: 1.5; color: var(--ink-2); }
+.feed-item .what b { font-weight: 700; color: var(--ink); }
+.feed-item .what::before {
+  content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin: 0 6px 1px 0; vertical-align: middle; background: var(--marker);
+}
+.feed-item.is-like .what::before { background: var(--like); }
+.feed-item.is-post .what::before { background: var(--ok); }
+.feed-item .quote, .feed-item .when { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feed-item .quote { font-size: var(--text-xs); color: var(--muted); }
+.feed-item .when { font-size: .6875rem; color: var(--faint); }
+.post.flash { box-shadow: 0 0 0 2px var(--marker), var(--shadow); transition: box-shadow .3s; }
+.post, .post .comments { scroll-margin-top: 80px; }
+
 .sponsor-edit { display: grid; grid-template-columns: 1fr 240px; gap: 24px; align-items: start; }
 .sponsor-edit textarea { min-height: 72px; }
 .sponsor-preview { display: grid; gap: 8px; position: sticky; top: 80px; }

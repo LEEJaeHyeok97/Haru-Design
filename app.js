@@ -195,6 +195,22 @@ async function createSupabaseApi(onAuthChange) {
       must(await sb.from('comments').insert({ post_id: postId, content, ...(parentId ? { parent_id: parentId } : {}) }));
     },
     async deleteComment(id) { must(await sb.from('comments').delete().eq('id', id)); },
+    // 왼쪽 '최근 활동' 칸: since 이후의 글, 댓글, 좋아요. 글 본문은 가져오지 않는다.
+    async recentActivity({ since, limit }) {
+      const nick = (a) => a?.nickname || '알 수 없음';
+      const post = 'post:posts!inner(id,topic_id,author:profiles!posts_user_id_fkey(nickname))';
+      const recent = (q, n = limit) => q.gte('created_at', since).order('created_at', { ascending: false }).limit(n);
+      const [posts, comments, likes] = (await Promise.all([
+        recent(sb.from('posts').select('id,topic_id,created_at,author:profiles!posts_user_id_fkey(nickname)')),
+        recent(sb.from('comments').select(`content,created_at,author:profiles!comments_user_id_fkey(nickname),${post}`)),
+        recent(sb.from('likes').select(`created_at,user:profiles(nickname),${post}`), limit * 3),
+      ])).map(must);
+      return [
+        ...posts.map((r) => ({ kind: 'post', at: r.created_at, who: nick(r.author), topic_id: r.topic_id, post_id: r.id })),
+        ...comments.map((r) => ({ kind: 'comment', at: r.created_at, who: nick(r.author), owner: nick(r.post.author), topic_id: r.post.topic_id, post_id: r.post.id, text: r.content })),
+        ...likes.map((r) => ({ kind: 'like', at: r.created_at, who: nick(r.user), owner: nick(r.post.author), topic_id: r.post.topic_id, post_id: r.post.id })),
+      ];
+    },
 
     // AI 평가는 Vercel 서버 함수(/api/review)가 처리한다. 만료된 토큰은 getSession 이 갱신해 준다.
     async review(payload) {
@@ -372,7 +388,7 @@ function demoSeed() {
       content: `## 선택한 방식과 이유\n기본은 push, 팔로워 10만 명 이상 계정만 pull로 섞는다.\n일반 계정은 쓰기 비용이 작고 읽기가 빨라지는 이점이 크다. 대형 계정까지 push 하면 글 하나에 100만 번 쓰기가 생겨서 따로 뺐다.\n\n## 포기한 것\n두 방식을 같이 운영하는 복잡도. 피드 조회 때 두 결과를 합치는 로직이 필요하다.` },
   ];
   const likes = [];
-  const like = (postId, userIds) => userIds.forEach((u) => likes.push({ post_id: postId, user_id: u }));
+  const like = (postId, userIds) => userIds.forEach((u, i) => likes.push({ post_id: postId, user_id: u, created_at: t(5 + postId % 10 * 7 + i * 13) }));
   like(101, ['u-jun', 'u-haru', 'u-4', 'u-5', 'u-6', 'u-7', 'u-8']);
   like(102, ['u-mocha', 'u-4', 'u-9']);
   like(103, ['u-5', 'u-7']);
@@ -587,7 +603,7 @@ function createDemoApi() {
     async setLike(postId, on) {
       const me = need();
       db.likes = db.likes.filter((l) => !(l.post_id === postId && l.user_id === me));
-      if (on) db.likes.push({ post_id: postId, user_id: me });
+      if (on) db.likes.push({ post_id: postId, user_id: me, created_at: new Date().toISOString() });
       save();
     },
     async listComments(postId) {
@@ -601,6 +617,17 @@ function createDemoApi() {
     },
     // 댓글을 지우면 달린 답글도 함께 지운다 (Supabase 의 on delete cascade 와 같게)
     async deleteComment(id) { db.comments = db.comments.filter((c) => c.id !== id && c.parent_id !== id); save(); },
+    async recentActivity({ since }) {
+      await wait();
+      const post = (id) => db.posts.find((p) => p.id === id);
+      const about = (p) => ({ owner: user(p.user_id).nickname, topic_id: p.topic_id, post_id: p.id });
+      // 예전 데모 데이터의 좋아요에는 시각이 없어서 뺀다
+      return [
+        ...db.posts.map((p) => ({ kind: 'post', at: p.created_at, who: user(p.user_id).nickname, topic_id: p.topic_id, post_id: p.id })),
+        ...db.comments.filter((c) => post(c.post_id)).map((c) => ({ kind: 'comment', at: c.created_at, who: user(c.user_id).nickname, text: c.content, ...about(post(c.post_id)) })),
+        ...db.likes.filter((l) => l.created_at && post(l.post_id)).map((l) => ({ kind: 'like', at: l.created_at, who: user(l.user_id).nickname, ...about(post(l.post_id)) })),
+      ].filter((x) => x.at >= since);
+    },
     async review() { throw new Error('AI 평가는 데모 모드에서는 쓸 수 없어요.'); },
     // 데모에서는 Claude 대신 글 길이와 단락으로 그럴듯한 점수를 만든다
     async scorePost(postId) {
@@ -705,6 +732,7 @@ const state = {
   sponsors: [],           // 켜진 스폰서 (관리자는 전부), sort_order 순
   editingSponsor: null,   // 관리자: 수정 중인 스폰서
   sponsorFile: null,      // 관리자: 새로 고른 이미지 { file, url }
+  feed: [],               // 왼쪽 최근 활동 (buildFeed)
 };
 
 /* ---------- 이용 기록 (관리자 지표용) ---------- */
@@ -1925,6 +1953,65 @@ function renderRail() {
     : sponsorCardHtml(null);
 }
 
+/* ---------- 최근 활동 칸 ---------- */
+// 넓은 화면에서 본문 왼쪽에 최근 글, 댓글, 좋아요를 보여준다. 답 내용은 빼고 누가 무엇을 했는지만.
+// 같은 글의 좋아요는 한 줄로 묶는다. 활동이 없으면 칸을 숨긴다.
+const FEED_DAYS = 7, FEED_MAX = 8, FEED_POLL_MS = 90 * 1000;
+function buildFeed(items) {
+  const likes = new Map();  // post_id -> 그 글의 가장 최근 좋아요 줄
+  const out = [];
+  for (const it of [...items].sort((a, b) => b.at.localeCompare(a.at))) {
+    if (it.kind === 'like') {
+      if (likes.has(it.post_id)) { likes.get(it.post_id).others++; continue; }
+      it.others = 0;
+      likes.set(it.post_id, it);
+    }
+    out.push(it);
+  }
+  return out;
+}
+async function refreshFeed() {
+  try {
+    const since = new Date(Date.now() - FEED_DAYS * 86400000).toISOString();
+    state.feed = buildFeed(await api.recentActivity({ since, limit: 20 }));
+  } catch { /* 못 불러오면 보던 목록을 그대로 둔다 */ }
+}
+function feedItemHtml(it, title) {
+  const who = `<b>${esc(it.who)}</b>님`;
+  const owner = it.owner && it.owner !== it.who ? `<b>${esc(it.owner)}</b>님 글` : '자기 글';
+  const what = it.kind === 'post' ? `${who}이 답을 올렸어요`
+    : it.kind === 'comment' ? `${who}이 ${owner}에 댓글을 달았어요`
+    : `${who}${it.others ? ` 외 ${it.others}명` : ''}이 ${owner}을 좋아해요`;
+  return `<button class="feed-item is-${it.kind}" type="button" data-act="feed-open" data-t="${it.topic_id}" data-p="${it.post_id}" data-c="${it.kind === 'comment' ? 1 : ''}">
+    <span class="what">${what}</span>
+    ${it.kind === 'comment' ? `<span class="quote">${esc(it.text.slice(0, 80))}</span>` : ''}
+    <span class="when">${esc(title)} · ${ago(it.at)}</span></button>`;
+}
+function renderFeed() {
+  const box = $('#feed');
+  if (!box) return;
+  const titles = new Map(publishedTopics().map((t) => [t.id, t.title]));
+  const items = state.feed.filter((it) => titles.has(it.topic_id)).slice(0, FEED_MAX);
+  const show = state.view !== 'admin' && !state.composing && items.length > 0;
+  box.hidden = !show;
+  box.innerHTML = show ? `<div class="feed"><h2>최근 활동</h2>${items.map((it) => feedItemHtml(it, titles.get(it.topic_id))).join('')}</div>` : '';
+}
+const updateFeed = () => refreshFeed().then(renderFeed);
+// 그 문제로 가서 해당 글을 보여준다. 댓글이면 댓글도 펼친다.
+async function openFeedItem(topicId, postId, withComments) {
+  await openTopic(topicId);
+  if (withComments && state.posts.some((p) => p.id === postId) && !state.openComments.has(postId)) {
+    state.openComments.add(postId);
+    state.comments[postId] = await api.listComments(postId);
+    render();
+  }
+  const el = $(`#post-${postId}`);
+  if (!el) return toast('지워진 글이에요.');
+  ((withComments && el.querySelector('.comments')) || el).scrollIntoView({ behavior: 'smooth', block: 'start' });
+  el.classList.add('flash');
+  setTimeout(() => el.classList.remove('flash'), 1600);
+}
+
 /* ---------- 관리자: 스폰서 ---------- */
 // 수정 중인 광고는 state.editingSponsor 에 두고, 글자 입력은 미리 보기만 다시 그린다
 const spBlank = () => ({ id: null, title: '', body: '', link_url: 'https://', active: true, image_url: null, image_style: spStyle(null) });
@@ -2297,6 +2384,7 @@ function render() {
   document.body.classList.toggle('composing', !!$('#composer'));
   document.body.classList.toggle('has-fab', !!$('.fab'));
   renderRail();
+  renderFeed();
   if ($('#dg-svg')) dgRender();
   for (const el of main.querySelectorAll('[data-c-input]')) if (el.value.includes('\n') || el.value.length > 40) fitTextarea(el);
   const sheet = $('.compose-sheet');
@@ -2378,7 +2466,7 @@ async function toggleLike(id) {
   p.liked = on; p.like_count += on ? 1 : -1;
   const btn = document.querySelector(`[data-act="like"][data-id="${id}"]`);
   if (btn) btn.outerHTML = likeBtn(p);
-  try { await api.setLike(id, on); track('like', on ? 'on' : 'off'); }
+  try { await api.setLike(id, on); track('like', on ? 'on' : 'off'); updateFeed(); }
   catch (e) { p.liked = !on; p.like_count += on ? -1 : 1; render(); toast(friendlyError(e)); }
 }
 
@@ -2387,6 +2475,7 @@ async function submitComment(postId, text, parentId = null, inputId = null) {
     await api.addComment(postId, text, parentId);
     if (inputId) delete state.commentDrafts[inputId];
     track('comment_create', parentId ? 'reply' : 'comment');
+    updateFeed();
     state.comments[postId] = await api.listComments(postId);
     const p = state.posts.find((x) => x.id === postId); if (p) p.comment_count = state.comments[postId].length;
     if (parentId) state.replyTo = null;
@@ -2447,6 +2536,7 @@ document.addEventListener('click', async (ev) => {
   if (act === 'reset-demo') { api.reset(); state.composing = false; state.diagram = dgNew(); dgResetHistory(); state.review = null; state.draft = TEMPLATE; state.draftFile = null; state.draftPreview = null; await refreshMe(); return openToday(); }
   if (act === 'compose') { state.composing = true; render(); $('#post-content')?.focus(); return; }
   if (act === 'ai-review') return runReview();
+  if (act === 'feed-open') return openFeedItem(Number(el.dataset.t) || el.dataset.t, Number(el.dataset.p) || el.dataset.p, !!el.dataset.c);
   if (act === 'reply') return openReply(Number(el.dataset.post) || el.dataset.post, Number(el.dataset.root) || el.dataset.root, el.dataset.nick);
   if (act === 'cancel-reply') { delete state.commentDrafts[`r-input-${state.replyTo?.rootId}`]; state.replyTo = null; return render(); }
   if (act === 'metrics-days') return loadMetrics(Number(el.dataset.days));
@@ -2552,6 +2642,7 @@ document.addEventListener('click', async (ev) => {
       if (!confirmed(el)) return;
       const postId = Number(el.dataset.post) || el.dataset.post;
       await api.deleteComment(id);
+      updateFeed();
       state.comments[postId] = await api.listComments(postId);
       const p = state.posts.find((x) => x.id === postId); if (p) p.comment_count = state.comments[postId].length;
       return render();
@@ -2559,7 +2650,7 @@ document.addEventListener('click', async (ev) => {
     if (act === 'del-post') {
       if (!confirmed(el)) return;
       await api.deletePost(state.posts.find((x) => x.id === id));
-      await refreshPosts(); await refreshTopics(); render(); return toast('설계를 삭제했어요');
+      await refreshPosts(); await refreshTopics(); render(); updateFeed(); return toast('설계를 삭제했어요');
     }
     if (act === 'edit-topic') { state.editingTopic = state.topics.find((t) => t.id === id); render(); $('#t-title')?.focus(); return; }
     if (act === 'cancel-edit') { state.editingTopic = null; return render(); }
@@ -2642,6 +2733,7 @@ document.addEventListener('submit', async (ev) => {
       const file = state.dgMode === 'image' ? state.draftFile : await dgExportPng();
       await api.createPost(state.topicId, content, file);
       track('post_create');
+      updateFeed();
       if (state.draftPreview?.startsWith('blob:')) URL.revokeObjectURL(state.draftPreview);
       state.draft = TEMPLATE; state.draftFile = null; state.draftPreview = null; state.composing = false;
       state.diagram = dgNew(); dgResetHistory(); state.dgMode = 'canvas'; state.review = null;
@@ -2772,6 +2864,8 @@ document.addEventListener('focusout', (ev) => { if (ev.target.matches?.('.chart 
     api = DEMO ? createDemoApi() : await createSupabaseApi(() => afterAuthChange());
     await refreshMe();
     refreshSponsors().then(renderRail);
+    updateFeed();
+    setInterval(() => { if (document.visibilityState === 'visible') updateFeed(); }, FEED_POLL_MS);
     if (!noticeClosed) api.subscriberCount().then((n) => { state.subCount = n; renderChrome(); }).catch(() => {});
     const hash = location.hash.replace('#', '');
     if (hash === 'admin' || hash === 'archive') { await refreshTopics(); go(hash); }
