@@ -14,7 +14,7 @@
 
 ## 백엔드
 
-- Supabase 프로젝트 `kqgxhfdwngmxyrkceprm`. 테이블: `topics`, `posts`, `likes`, `comments`(`parent_id`로 대댓글 한 단계), `profiles`, `events`(이용 기록, insert만 공개), `subscribers`(이메일 구독, insert만 공개·select/delete는 `is_admin()`), `sponsors`(스폰서 광고, `active`인 것만 공개), `newsletter_sends`(문제 메일 발송 기록, select는 `is_admin()`).  `events.type` 최신 목록은 `supabase/2026-10-25-sponsors.sql`에 있다. RPC `is_admin`, `subscriber_count`(누구나, 숫자만), `admin_metrics(days)`, `admin_timeline(hours)`. Storage 버킷 `designs`.
+- Supabase 프로젝트 `kqgxhfdwngmxyrkceprm`. 테이블: `topics`, `posts`, `likes`, `comments`(`parent_id`로 대댓글 한 단계), `profiles`, `events`(이용 기록, insert만 공개), `subscribers`(이메일 구독, insert만 공개·select/delete는 `is_admin()`), `sponsors`(스폰서 광고, `active`인 것만 공개), `newsletter_sends`(문제 메일 발송 기록, select는 `is_admin()`), `feedback`(상단 '개발자 혼내러가기' 의견, insert만 공개·select/delete는 `is_admin()`).  `events.type` 최신 목록은 `supabase/2026-10-29-feedback.sql`에 있다. RPC `is_admin`, `subscriber_count`(누구나, 숫자만), `admin_metrics(days)`, `admin_timeline(hours)`. Storage 버킷 `designs`.
 - 새 사용자 동작을 지표에 넣으려면 `track(type, path)`를 부르고, `events.type` check 제약(SQL)과 `ENDPOINTS` 라벨(app.js)을 같이 늘린다. 요청 모니터링 그래프에도 보이려면 `TL_SERIES`에 색과 함께 추가한다.
 - 스키마 SQL은 레포에 없다. DB 변경은 `supabase/날짜-이름.sql`로 만들고 사용자에게 SQL Editor에서 실행해 달라고 한다 (Claude가 직접 실행할 수 없음). 컬럼이 아직 없어도 깨지지 않게 조회는 `select('*')` 쪽을 선호.
 - 읽기 확인은 anon key로 REST 조회 가능: `curl "$URL/rest/v1/comments?select=*&limit=1" -H "apikey: $KEY"`. 운영 DB에 쓰기 요청은 보내지 말 것.

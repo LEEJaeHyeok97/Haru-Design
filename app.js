@@ -255,6 +255,10 @@ async function createSupabaseApi(onAuthChange) {
     },
     async listSubscribers() { return must(await sb.from('subscribers').select('*').order('created_at', { ascending: false })); },
     async deleteSubscriber(id) { must(await sb.from('subscribers').delete().eq('id', id)); },
+    // 개발자 혼내러가기 (supabase/2026-10-29-feedback.sql). 남기기는 누구나, 보기·삭제는 관리자만.
+    async sendFeedback({ kind, body, contact, nickname }) { must(await sb.from('feedback').insert({ kind, body, contact, nickname })); },
+    async listFeedback() { return must(await sb.from('feedback').select('*').order('created_at', { ascending: false })); },
+    async deleteFeedback(id) { must(await sb.from('feedback').delete().eq('id', id)); },
     // 매일 문제 메일 (api/newsletter.js, supabase/2026-10-28-newsletter.sql)
     async lastNewsletter() {
       const { data, error } = await sb.from('newsletter_sends').select('*').order('started_at', { ascending: false }).limit(1);
@@ -681,6 +685,9 @@ function createDemoApi() {
     async subscriberCount() { return 128 + (db.subscribers || []).length; },
     async listSubscribers() { needAdmin(); await wait(); return [...(db.subscribers || [])].sort((a, b) => b.created_at.localeCompare(a.created_at)); },
     async deleteSubscriber(id) { needAdmin(); db.subscribers = (db.subscribers || []).filter((s) => s.id !== id); save(); },
+    async sendFeedback(row) { await wait(); db.feedback = (db.feedback || []).concat({ ...row, id: nextId(), created_at: new Date().toISOString() }); save(); },
+    async listFeedback() { needAdmin(); await wait(); return [...(db.feedback || [])].sort((a, b) => b.created_at.localeCompare(a.created_at)); },
+    async deleteFeedback(id) { needAdmin(); db.feedback = (db.feedback || []).filter((f) => f.id !== id); save(); },
     async lastNewsletter() { return null; },
     async sendTestMail() { throw new Error('메일 발송은 데모 모드에서는 쓸 수 없어요.'); },
 
@@ -725,6 +732,7 @@ const state = {
   subDone: false,         // 방금 구독함 (이번 방문 동안 고마움 표시)
   subCount: null,         // 구독자 수 (상단 공지에 표시)
   subscribers: null,      // 관리자: { list, loading, error }
+  feedback: null,         // 관리자: 받은 의견 { list, loading, error }
   sponsors: [],           // 켜진 스폰서 (관리자는 전부), sort_order 순
   editingSponsor: null,   // 관리자: 수정 중인 스폰서
   sponsorFile: null,      // 관리자: 새로 고른 이미지 { file, url }
@@ -759,7 +767,7 @@ function go(view, topicId = null) {
   window.scrollTo({ top: 0 });
   render();
   track('view', '/' + view);
-  if (view === 'admin' && state.me?.isAdmin) { loadMetrics(); loadTimeline(); loadSubscribers(); refreshSponsors().then(() => { const w = $('.sponsor-rows-wrap'); if (w) w.outerHTML = sponsorRowsHtml(); }); }
+  if (view === 'admin' && state.me?.isAdmin) { loadMetrics(); loadTimeline(); loadSubscribers(); loadFeedback(); refreshSponsors().then(() => { const w = $('.sponsor-rows-wrap'); if (w) w.outerHTML = sponsorRowsHtml(); }); }
 }
 
 async function refreshMe() { state.me = await api.me(); }
@@ -847,7 +855,11 @@ function renderChrome() {
   const items = [['today', '오늘의 문제'], ['archive', '지난 문제']];
   if (state.me?.isAdmin) items.push(['admin', '관리자']);
   const active = state.view === 'topic' ? 'archive' : state.view;
-  $('#nav').innerHTML = items.map(([v, label]) => `<button type="button" data-nav="${v}" ${active === v ? 'aria-current="page"' : ''}>${label}</button>`).join('');
+  const navBtn = ([v, label]) => `<button type="button" data-nav="${v}" ${active === v ? 'aria-current="page"' : ''}>${label}</button>`;
+  // 지난 문제와 관리자 사이에 의견 창 버튼
+  $('#nav').innerHTML = items.slice(0, 2).map(navBtn).join('')
+    + '<button type="button" class="nav-feedback" data-act="feedback">개발자 혼내러가기</button>'
+    + items.slice(2).map(navBtn).join('');
   $('#who').innerHTML = !state.me
     ? `<button class="btn ghost small" type="button" data-act="nickname">닉네임 정하기</button>`
     : state.me.isAdmin
@@ -1796,6 +1808,9 @@ const ENDPOINTS = {
   'like off': ['DELETE', '좋아요 취소'],
   'ai_review ': ['POST', '/api/review · AI 평가'],
   'subscribe ': ['POST', '이메일 구독'],
+  'feedback suggest': ['POST', '의견 · 건의'],
+  'feedback question': ['POST', '의견 · 문의'],
+  'feedback improve': ['POST', '의견 · 개선'],
 };
 const fmtNum = (n) => Number(n || 0).toLocaleString('ko-KR');
 const fmtSec = (ms) => (ms == null ? '-' : `${(ms / 1000).toFixed(1)}초`);
@@ -2152,6 +2167,42 @@ function subscribersHtml() {
   return `<section class="panel subscribers">${head}${newsletterHtml(s.last)}${body}</section>`;
 }
 
+/* ---------- 관리자: 받은 의견 ---------- */
+const FEEDBACK_KINDS = [['suggest', '건의'], ['question', '문의'], ['improve', '개선']];
+const feedbackKind = (k) => (FEEDBACK_KINDS.find(([v]) => v === k) || [k, k])[1];
+function renderFeedbackAdmin() {
+  const el = $('.feedback-admin');
+  if (el) el.outerHTML = feedbackAdminHtml();
+}
+async function loadFeedback() {
+  state.feedback = { ...(state.feedback || {}), loading: true, error: null };
+  renderFeedbackAdmin();
+  try { state.feedback = { list: await api.listFeedback() }; }
+  catch (e) {
+    const m = (e && e.message) || '';
+    state.feedback = { error: /feedback|schema cache|does not exist/i.test(m)
+      ? '의견용 DB 설정이 아직 없어요. supabase/2026-10-29-feedback.sql 을 SQL Editor 에서 실행해 주세요.'
+      : friendlyError(e) };
+  }
+  renderFeedbackAdmin();
+}
+function feedbackAdminHtml() {
+  const s = state.feedback || { loading: true };
+  const list = s.list || [];
+  const head = `<div class="metrics-head"><h2>받은 의견 ${s.list ? `<span class="mono sub-count">${fmtNum(list.length)}개</span>` : ''}</h2>
+    <button class="btn ghost small" type="button" data-act="feedback-refresh" ${s.loading ? 'disabled' : ''}>${s.loading ? '불러오는 중…' : '새로고침'}</button></div>`;
+  let body;
+  if (s.error) body = `<p class="err" role="alert">${esc(s.error)}</p>`;
+  else if (!s.list) body = '<p class="loading">불러오는 중…</p>';
+  else if (!list.length) body = '<p class="hint">아직 받은 의견이 없어요. 상단 \'개발자 혼내러가기\'에서 남기면 여기에 보여요.</p>';
+  else body = `<ul class="fb-list">${list.map((x) => `
+      <li><div class="fb-meta"><span class="chip">${esc(feedbackKind(x.kind))}</span><span class="name">${esc(x.nickname || '익명')}</span>${x.contact ? `<span class="fb-contact">${esc(x.contact)}</span>` : ''}
+        <time datetime="${esc(x.created_at)}">${fmtDate(kstDate(new Date(x.created_at)))}</time>
+        <button class="btn ghost small danger" type="button" data-act="del-feedback" data-id="${x.id}">삭제</button></div>
+        <p class="fb-body">${esc(x.body)}</p></li>`).join('')}</ul>`;
+  return `<section class="panel feedback-admin">${head}${body}</section>`;
+}
+
 /* ---------- 관리자: 요청 모니터링 (시간대별) ---------- */
 // 요청 종류마다 색이 하나씩 고정이다 (걸러도 다시 칠하지 않는다). 색만으로 구분하지 않도록 범례·툴팁·표에 이름을 함께 쓴다.
 const TL_SERIES = [
@@ -2162,6 +2213,7 @@ const TL_SERIES = [
   ['ai_review', 'AI 평가', '#e87ba4'],
   ['subscribe', '이메일 구독', '#008300'],
   ['sponsor_click', '스폰서 클릭', '#6250d6'],
+  ['feedback', '의견 남기기', '#7a5c3d'],
 ];
 const TL_RANGES = [[24, '24시간'], [168, '7일'], [720, '30일']];
 const kstParts = (ms) => Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(ms)).map((p) => [p.type, p.value]));
@@ -2322,6 +2374,7 @@ function viewAdmin() {
   ${metricsHtml()}
   ${timelineHtml()}
   ${subscribersHtml()}
+  ${feedbackAdminHtml()}
   ${sponsorsAdminHtml()}
   <div><h1 class="page-title">문제 관리</h1><p class="page-sub">날짜마다 문제 하나가 그날 0시(한국 시간)에 공개돼요. 미래 날짜로 미리 예약해 둘 수 있어요.</p></div>
   <section class="panel">
@@ -2437,6 +2490,50 @@ function openNickname(onDone) {
   draw();
 }
 
+/* 개발자 혼내러가기: 건의·문의·개선 의견을 남긴다. 닉네임 없이도 보낼 수 있다. */
+function openFeedback() {
+  const layer = $('#layer');
+  let kind = 'suggest';
+  const draw = (err = '') => {
+    const body = $('#fb-body', layer)?.value ?? '', contact = $('#fb-contact', layer)?.value ?? '';
+    layer.innerHTML = `
+    <div class="overlay" data-act="close-layer">
+      <div class="modal fb-modal" role="dialog" aria-modal="true" aria-labelledby="fb-title">
+        <h2 id="fb-title">개발자 혼내러가기</h2>
+        <p class="info">불편한 점, 궁금한 점, 바라는 점 모두 좋아요. 꼼꼼히 읽고 고칠게요.</p>
+        <form class="form-grid" id="fb-form">
+          <div class="seg" role="group" aria-label="의견 종류">${FEEDBACK_KINDS.map(([v, label]) => `<button type="button" data-kind="${v}" aria-pressed="${kind === v}">${label}</button>`).join('')}</div>
+          <div class="field"><label for="fb-body">내용</label><textarea id="fb-body" maxlength="2000" required placeholder="예: 캔버스에서 노드를 여러 개 한 번에 옮기고 싶어요.">${esc(body)}</textarea></div>
+          <div class="field"><label for="fb-contact">답장 받을 연락처 <span class="sub">선택</span></label><input type="text" id="fb-contact" maxlength="254" autocomplete="email" placeholder="이메일 등" value="${esc(contact)}"></div>
+          ${err ? `<p class="err" role="alert">${esc(err)}</p>` : ''}
+          <div class="actions"><button class="btn ghost" type="button" data-act="close-layer">닫기</button><button class="btn primary" type="submit">보내기</button></div>
+        </form>
+      </div>
+    </div>`;
+    $('#fb-body', layer).focus();
+    layer.querySelectorAll('[data-kind]').forEach((b) => b.addEventListener('click', () => {
+      kind = b.dataset.kind;
+      layer.querySelectorAll('[data-kind]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+    }));
+    $('#fb-form', layer).addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const text = $('#fb-body', layer).value.trim();
+      if (!text) return draw('내용을 입력해 주세요.');
+      const btn = ev.submitter || $('#fb-form [type="submit"]', layer); btn.disabled = true;
+      try {
+        await api.sendFeedback({ kind, body: text.slice(0, 2000), contact: $('#fb-contact', layer).value.trim().slice(0, 254) || null, nickname: state.me?.nickname || null });
+        track('feedback', kind);
+        closeLayer();
+        toast('보내 주셔서 고마워요. 꼭 읽어볼게요');
+      } catch (e) {
+        const m = (e && e.message) || '';
+        draw(/feedback|schema cache|does not exist/i.test(m) ? '지금은 의견을 받을 수 없어요. 아래 문의 메일로 보내 주세요.' : friendlyError(e));
+      }
+    });
+  };
+  draw();
+}
+
 /* 닉네임이 있어야 하는 동작 앞에 붙이는 헬퍼 */
 function requireUser(action) { return state.me ? action() : openNickname(action); }
 
@@ -2508,6 +2605,8 @@ document.addEventListener('click', async (ev) => {
   const act = el.dataset.act;
   if (act === 'close-layer') { if (ev.target === el || el.tagName === 'BUTTON' || el.classList.contains('lightbox')) closeLayer(); return; }
   if (act === 'nickname') return openNickname();
+  if (act === 'feedback') return openFeedback();
+  if (act === 'feedback-refresh') return loadFeedback();
   if (act === 'dismiss-notice') {
     noticeClosed = true; state.subDone = false;
     try { localStorage.setItem(NOTICE_KEY, '1'); } catch { /* 이번 방문 동안만 닫힘 */ }
@@ -2585,6 +2684,12 @@ document.addEventListener('click', async (ev) => {
     const text = (state.subscribers?.list || []).map((x) => x.email).join(', ');
     try { await navigator.clipboard.writeText(text); toast('이메일 주소를 모두 복사했어요'); }
     catch { toast('복사하지 못했어요. 목록에서 직접 선택해 주세요.'); }
+    return;
+  }
+  if (act === 'del-feedback') {
+    if (!confirmed(el)) return;
+    try { await api.deleteFeedback(Number(el.dataset.id) || el.dataset.id); await loadFeedback(); toast('의견을 삭제했어요'); }
+    catch (e) { toast(friendlyError(e)); }
     return;
   }
   if (act === 'del-subscriber') {
