@@ -852,14 +852,11 @@ const htmlNode = (html) => { const t = document.createElement('template'); t.inn
 
 /* ---------- header ---------- */
 function renderChrome() {
+  // 관리자 페이지는 맨 아래 링크로 들어간다
   const items = [['today', '오늘의 문제'], ['archive', '지난 문제']];
-  if (state.me?.isAdmin) items.push(['admin', '관리자']);
   const active = state.view === 'topic' ? 'archive' : state.view;
-  const navBtn = ([v, label]) => `<button type="button" data-nav="${v}" ${active === v ? 'aria-current="page"' : ''}>${label}</button>`;
-  // 지난 문제와 관리자 사이에 의견 창 버튼
-  $('#nav').innerHTML = items.slice(0, 2).map(navBtn).join('')
-    + '<button type="button" class="nav-feedback" data-act="feedback">개발자 혼내러가기</button>'
-    + items.slice(2).map(navBtn).join('');
+  $('#nav').innerHTML = items.map(([v, label]) => `<button type="button" data-nav="${v}" ${active === v ? 'aria-current="page"' : ''}>${label}</button>`).join('')
+    + '<button type="button" class="nav-feedback" data-act="feedback">개발자 혼내러가기</button>';
   $('#who').innerHTML = !state.me
     ? `<button class="btn ghost small" type="button" data-act="nickname">닉네임 정하기</button>`
     : state.me.isAdmin
