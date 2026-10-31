@@ -556,23 +556,6 @@ a.sponsor:hover { box-shadow: var(--shadow-lg); transform: translateY(-1px); }
 .sponsor p { margin: 0; font-size: var(--text-xs); line-height: 1.6; color: var(--muted); white-space: pre-line; }
 .sponsor-link { font-size: var(--text-xs); color: var(--marker); font-weight: 600; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sponsor.house { background: var(--sheet); box-shadow: none; border: 1px dashed var(--line); }
-.sponsor.banner { position: relative; display: block; padding: 0; overflow: hidden; }
-.sponsor.banner img { margin: 0; border-radius: 0; }
-.rail-ad, .rail-top-ad { display: grid; }
-#top-ad { display: none; }
-/* 넓은 화면: 상단바 오른쪽, 오른쪽 칸과 같은 열에 상단바 높이만큼 */
-@media (min-width: 1200px) {
-  #top-ad:not([hidden]) { display: block; position: absolute; top: 8px; bottom: 8px; left: calc(50% + 320px + 32px); width: 240px; }
-  .rail-top-ad { display: none; }
-}
-.sponsor.banner.top, .top-ad-preview .sponsor { height: 100%; }
-.sponsor.banner.top img { width: 100%; height: 100%; }
-.sponsor.banner.top { border-radius: 14px; box-shadow: 0 0 0 1px var(--line); }
-.top-ad-preview { width: 240px; height: 88px; }
-.sponsor.banner .sponsor-label {
-  position: absolute; top: 8px; left: 8px; padding: 2px 7px; border-radius: 6px;
-  background: rgba(0, 0, 0, .45); color: #fff; font-size: .625rem;
-}
 .sponsor.house .btn { justify-self: start; margin-top: 4px; text-decoration: none; }
 @media (min-width: 1200px) {
   #rail {
