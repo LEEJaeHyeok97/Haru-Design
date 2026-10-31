@@ -23,6 +23,17 @@ const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const SUB_COUNT_MIN = 10;
 let noticeClosed = false;
 try { noticeClosed = localStorage.getItem(NOTICE_KEY) === '1'; } catch { /* 저장소를 못 쓰면 매번 보여준다 */ }
+// 문제 즐겨찾기: 로그인 없이 이 브라우저에만 남긴다. 최근에 누른 것이 앞.
+const BOOKMARK_KEY = 'harusolgye-bookmarks';
+let bookmarks = [];
+try { bookmarks = JSON.parse(localStorage.getItem(BOOKMARK_KEY) || '[]').map(String); } catch { /* 이번 방문 동안만 기억 */ }
+const isBookmarked = (id) => bookmarks.includes(String(id));
+function toggleBookmark(id) {
+  id = String(id);
+  bookmarks = isBookmarked(id) ? bookmarks.filter((x) => x !== id) : [id, ...bookmarks];
+  try { localStorage.setItem(BOOKMARK_KEY, JSON.stringify(bookmarks)); } catch { /* 이번 방문 동안만 기억 */ }
+  return isBookmarked(id);
+}
 
 const TEMPLATE = `## 요구사항 가정\n\n\n## 핵심 구성 요소\n\n\n## 선택한 방식과 이유\n\n\n## 포기한 것\n`;
 
@@ -888,11 +899,16 @@ function sheetHtml(topic, { isToday }) {
   const chip = isToday ? '<span class="chip">오늘의 문제</span>' : '<span class="chip past">지난 문제</span>';
   return `
   <section class="sheet" aria-labelledby="topic-title">
-    <div class="sheet-meta">${chip}<span class="mono">${fmtDate(d)} (${weekday(d)}) · DAY ${dayOfYear(d)}</span></div>
+    <div class="sheet-meta">${chip}<span class="mono">${fmtDate(d)} (${weekday(d)}) · DAY ${dayOfYear(d)}</span>${bookmarkBtn(topic)}</div>
     <h1 id="topic-title">${esc(topic.title)}</h1>
     <p class="desc">${esc(topic.description)}</p>
     <div class="foot"><span class="count">지금까지 <b class="mono">${state.posts.filter((p) => !p.is_sample).length}</b>명이 설계를 올렸어요</span>${action}</div>
   </section>`;
+}
+
+function bookmarkBtn(topic) {
+  const on = isBookmarked(topic.id);
+  return `<button class="bookmark-btn" type="button" data-act="bookmark" data-id="${topic.id}" aria-pressed="${on}">${on ? '★ 즐겨찾기함' : '☆ 즐겨찾기'}</button>`;
 }
 
 /* ---------- composer ---------- */
@@ -1780,7 +1796,7 @@ function viewArchive() {
   ${list.length ? `<div class="list">${list.map((t) => `
     <button class="row" type="button" data-topic="${t.id}">
       <span class="date">${fmtDate(t.publish_date)} (${weekday(t.publish_date)})</span>
-      <span class="title">${esc(t.title)}</span>
+      <span class="title">${isBookmarked(t.id) ? '<span class="star" aria-label="즐겨찾기">★</span> ' : ''}${esc(t.title)}</span>
       <span class="n">설계 ${t.post_count}개</span>
     </button>`).join('')}</div>` : `<div class="panel empty"><h2>아직 문제가 없어요</h2></div>`}`;
 }
@@ -1957,8 +1973,17 @@ function renderRail() {
   rail.hidden = !show;
   const live = state.sponsors.filter((s) => s.active);
   rail.innerHTML = !show ? ''
-    : live.length ? `${live.map((s) => sponsorCardHtml(s)).join('')}<a class="sponsor-ask" href="${CONTACT_HREF}">광고 문의</a>`
-    : sponsorCardHtml(null);
+    : (live.length ? `${live.map((s) => sponsorCardHtml(s)).join('')}<a class="sponsor-ask" href="${CONTACT_HREF}">광고 문의</a>`
+    : sponsorCardHtml(null)) + bookmarksHtml();
+}
+// 스폰서 아래 즐겨찾기한 문제 목록. 아직 공개 전이거나 지워진 문제는 뺀다.
+function bookmarksHtml() {
+  const byId = new Map(publishedTopics().map((t) => [String(t.id), t]));
+  const list = bookmarks.map((id) => byId.get(id)).filter(Boolean);
+  return `<div class="feed bookmarks"><h2>즐겨찾기</h2>${list.length
+    ? list.map((t) => `<button class="feed-item" type="button" data-topic="${t.id}" ${String(t.id) === String(state.topicId) && state.view !== 'archive' ? 'aria-current="true"' : ''}>
+        <span class="what">${esc(t.title)}</span><span class="when">${fmtDate(t.publish_date)} (${weekday(t.publish_date)})</span></button>`).join('')
+    : '<p class="hint">문제 위의 ☆ 즐겨찾기를 누르면 여기에 모여요.</p>'}</div>`;
 }
 
 /* ---------- 최근 활동 칸 ---------- */
@@ -2603,6 +2628,13 @@ document.addEventListener('click', async (ev) => {
   if (act === 'close-layer') { if (ev.target === el || el.tagName === 'BUTTON' || el.classList.contains('lightbox')) closeLayer(); return; }
   if (act === 'nickname') return openNickname();
   if (act === 'feedback') return openFeedback();
+  if (act === 'bookmark') {
+    const on = toggleBookmark(el.dataset.id);
+    const t = state.topics.find((x) => String(x.id) === el.dataset.id);
+    if (t) el.outerHTML = bookmarkBtn(t);
+    renderRail();
+    return toast(on ? '즐겨찾기에 넣었어요' : '즐겨찾기에서 뺐어요');
+  }
   if (act === 'feedback-refresh') return loadFeedback();
   if (act === 'dismiss-notice') {
     noticeClosed = true; state.subDone = false;
