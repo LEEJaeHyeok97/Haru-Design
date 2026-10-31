@@ -1979,7 +1979,9 @@ function renderRail() {
   const live = state.sponsors.filter((s) => s.active);
   // 이미지가 있는 첫 광고는 넓은 화면에서 상단바 오른쪽 빈 곳에 띄운다 (좁은 화면에서는 본문 아래 그대로)
   const top = show ? live.find((s) => s.image_url) : null;
-  const topAd = $('#top-ad');
+  // 예전 index.html 이 캐시에 남아 자리가 없어도 광고가 사라지지 않게 만든다
+  let topAd = $('#top-ad');
+  if (!topAd && $('.topbar')) { topAd = document.createElement('div'); topAd.id = 'top-ad'; $('.topbar').append(topAd); }
   if (topAd) { topAd.hidden = !top; topAd.innerHTML = top ? sponsorCardHtml(top, { top: true }) : ''; }
   rail.innerHTML = !show ? ''
     : (live.length ? `${live.map((s) => `<div class="${s === top ? 'rail-top-ad' : 'rail-ad'}">${sponsorCardHtml(s)}</div>`).join('')}<a class="sponsor-ask" href="${CONTACT_HREF}">광고 문의</a>`
