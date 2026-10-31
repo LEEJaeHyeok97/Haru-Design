@@ -1941,30 +1941,30 @@ function spStyle(raw) {
   const r = raw && typeof raw === 'object' ? raw : {};
   const pct = (v) => Math.max(0, Math.min(100, Math.round(Number(v ?? 50)))) || 0;
   return {
-    ratio: '1.91',   // 오른쪽 칸 맨 위에 가로로 긴 배너로만 보여서 비율은 고정
+    ratio: '1.91',   // 좁은 화면에서 본문 아래에 보이는 배너 비율 (넓은 화면 상단바에서는 칸 높이에 맞춘다)
     fit: r.fit === 'contain' ? 'contain' : 'cover',
     x: pct(r.x), y: pct(r.y),
   };
 }
-function spImgStyle(raw) {
+function spImgStyle(raw, { fill = false } = {}) {
   const st = spStyle(raw);
-  return `aspect-ratio:${st.ratio};object-fit:${st.fit};object-position:${st.x}% ${st.y}%`;
+  return `${fill ? '' : `aspect-ratio:${st.ratio};`}object-fit:${st.fit};object-position:${st.x}% ${st.y}%`;
 }
 const bySponsorOrder = (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || b.created_at.localeCompare(a.created_at);
 async function refreshSponsors() {
   try { state.sponsors = (await api.listSponsors()).sort(bySponsorOrder); } catch { state.sponsors = []; }
 }
-function sponsorCardHtml(s, { preview = false } = {}) {
+function sponsorCardHtml(s, { preview = false, top = false } = {}) {
   if (!s) {
     return `<div class="sponsor house"><span class="sponsor-label">스폰서</span>
       <strong>이 자리에 광고를 걸어보세요</strong><p>매일 설계 문제를 푸는 개발자들에게 보여요.</p>
       <a class="btn small" href="${CONTACT_HREF}">광고 문의</a></div>`;
   }
   const st = spStyle(s.image_style);
-  // 이미지가 있으면 글 없이 가로로 긴 배너로만 보인다
+  // 이미지가 있으면 글 없이 가로로 긴 배너로만 보인다. top 은 넓은 화면 상단바 오른쪽 칸.
   if (s.image_url) {
-    return `<a class="sponsor banner" href="${esc(safeLink(s.link_url))}" target="_blank" rel="sponsored noopener" title="${esc(s.title)}" ${preview ? 'tabindex="-1"' : `data-act="sponsor-click" data-id="${s.id}"`}>
-      <img class="${st.fit}" src="${esc(s.image_url)}" alt="${esc(s.title)}" loading="lazy" style="${spImgStyle(st)}"><span class="sponsor-label">스폰서</span></a>`;
+    return `<a class="sponsor banner${top ? ' top' : ''}" href="${esc(safeLink(s.link_url))}" target="_blank" rel="sponsored noopener" title="${esc(s.title)}" ${preview ? 'tabindex="-1"' : `data-act="sponsor-click" data-id="${s.id}"`}>
+      <img class="${st.fit}" src="${esc(s.image_url)}" alt="${esc(s.title)}" loading="lazy" style="${spImgStyle(st, { fill: top })}"><span class="sponsor-label">스폰서</span></a>`;
   }
   return `<a class="sponsor" href="${esc(safeLink(s.link_url))}" target="_blank" rel="sponsored noopener" ${preview ? 'tabindex="-1"' : `data-act="sponsor-click" data-id="${s.id}"`}>
     <span class="sponsor-label">스폰서</span>
@@ -1977,8 +1977,12 @@ function renderRail() {
   const show = state.view !== 'admin' && !state.composing;
   rail.hidden = !show;
   const live = state.sponsors.filter((s) => s.active);
+  // 이미지가 있는 첫 광고는 넓은 화면에서 상단바 오른쪽 빈 곳에 띄운다 (좁은 화면에서는 본문 아래 그대로)
+  const top = show ? live.find((s) => s.image_url) : null;
+  const topAd = $('#top-ad');
+  if (topAd) { topAd.hidden = !top; topAd.innerHTML = top ? sponsorCardHtml(top, { top: true }) : ''; }
   rail.innerHTML = !show ? ''
-    : (live.length ? `${live.map((s) => sponsorCardHtml(s)).join('')}<a class="sponsor-ask" href="${CONTACT_HREF}">광고 문의</a>`
+    : (live.length ? `${live.map((s) => `<div class="${s === top ? 'rail-top-ad' : 'rail-ad'}">${sponsorCardHtml(s)}</div>`).join('')}<a class="sponsor-ask" href="${CONTACT_HREF}">광고 문의</a>`
     : sponsorCardHtml(null)) + bookmarksHtml();
 }
 // 스폰서 아래 즐겨찾기한 문제 목록. 아직 공개 전이거나 지워진 문제는 뺀다.
@@ -2088,7 +2092,9 @@ function sponsorsAdminHtml() {
 }
 function sponsorPreviewHtml() {
   const e = spEditing();
-  return `<span class="sub">미리 보기 · 실제 칸 너비(240px)</span>${sponsorCardHtml({ ...e, title: e.title || '제목', image_url: spImage(e) }, { preview: true })}`;
+  const s = { ...e, title: e.title || '제목', image_url: spImage(e) };
+  return `${s.image_url ? `<span class="sub">넓은 화면 · 상단바 오른쪽 (첫 번째 이미지 광고)</span><div class="top-ad-preview">${sponsorCardHtml(s, { preview: true, top: true })}</div>` : ''}
+    <span class="sub">${s.image_url ? '좁은 화면 · 본문 아래' : '미리 보기 · 실제 칸 너비(240px)'}</span>${sponsorCardHtml(s, { preview: true })}`;
 }
 function sponsorRowsHtml() {
   const rows = state.sponsors;
