@@ -762,9 +762,11 @@ const visitorId = (() => {
     return id;
   } catch { return randomId(); }
 })();
+// 배포 직후 Vercel 이 미리 보기 화면을 찍으려고 띄우는 브라우저처럼 사람이 아닌 방문은 빼고 센다
+const IS_BOT = navigator.webdriver || /headless|bot|crawl|spider|vercel|lighthouse|preview/i.test(navigator.userAgent);
 // 관리자 본인의 사용은 지표에서 뺀다. 기록이 실패해도 화면에는 영향이 없다.
 function track(type, path = null, extra = {}) {
-  if (!api || state.me?.isAdmin) return;
+  if (!api || state.me?.isAdmin || IS_BOT) return;
   api.track({ visitor_id: visitorId, type, path, ...extra }).catch(() => {});
 }
 
@@ -1982,8 +1984,9 @@ function bookmarksHtml() {
   const byId = new Map(publishedTopics().map((t) => [String(t.id), t]));
   const list = bookmarks.map((id) => byId.get(id)).filter(Boolean);
   return `<div class="feed bookmarks"><h2>즐겨찾기</h2>${list.length
-    ? list.map((t) => `<button class="feed-item" type="button" data-topic="${t.id}" ${String(t.id) === String(state.topicId) && state.view !== 'archive' ? 'aria-current="true"' : ''}>
-        <span class="what">${esc(t.title)}</span><span class="when">${fmtDate(t.publish_date)} (${weekday(t.publish_date)})</span></button>`).join('')
+    ? list.map((t) => `<div class="bm-item"><button class="feed-item" type="button" data-topic="${t.id}" ${String(t.id) === String(state.topicId) && state.view !== 'archive' ? 'aria-current="true"' : ''}>
+        <span class="what">${esc(t.title)}</span><span class="when">${fmtDate(t.publish_date)} (${weekday(t.publish_date)})</span></button>
+        <button class="bm-del" type="button" data-act="bookmark" data-id="${t.id}" aria-label="${esc(t.title)} 즐겨찾기에서 빼기" title="즐겨찾기에서 빼기">✕</button></div>`).join('')
     : '<p class="hint">문제 오른쪽 위의 별을 누르면 여기에 모여요.</p>'}</div>`;
 }
 
@@ -2632,8 +2635,10 @@ document.addEventListener('click', async (ev) => {
   if (act === 'bookmark') {
     const on = toggleBookmark(el.dataset.id);
     const t = state.topics.find((x) => String(x.id) === el.dataset.id);
-    if (t) el.outerHTML = bookmarkBtn(t);
-    renderRail();
+    const sheetBtn = $(`.sheet [data-act="bookmark"][data-id="${el.dataset.id}"]`);
+    if (t && sheetBtn) sheetBtn.outerHTML = bookmarkBtn(t);
+    // 지난 문제 목록의 ★ 도 맞춘다
+    if (state.view === 'archive') render(); else renderRail();
     return toast(on ? '즐겨찾기에 넣었어요' : '즐겨찾기에서 뺐어요');
   }
   if (act === 'feedback-refresh') return loadFeedback();

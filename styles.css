@@ -524,6 +524,13 @@ button.row:active { background: var(--pressed); }
 .bookmarks .feed-item .what::before { display: none; }
 .bookmarks .hint { margin: 0 8px 8px; font-size: var(--text-xs); }
 .bookmarks .feed-item[aria-current] { background: var(--fill); }
+.bm-item { position: relative; }
+.bm-item .feed-item { padding-right: 30px; }
+.bm-del {
+  position: absolute; top: 6px; right: 4px; width: 24px; height: 24px; display: grid; place-items: center; padding: 0;
+  border: 0; border-radius: 8px; background: none; font-size: .6875rem; color: var(--faint); opacity: .6; transition: opacity .15s, background .15s, color .15s;
+}
+.bm-del:hover, .bm-del:focus-visible { opacity: 1; background: var(--pressed); color: var(--ink-2); }
 .bookmark-btn {
   margin-left: auto; display: grid; place-items: center; width: 34px; height: 34px; padding: 0;
   border: 0; border-radius: 10px; background: var(--fill); transition: background .15s, transform .15s;
