@@ -557,6 +557,12 @@ a.sponsor:hover { box-shadow: var(--shadow-lg); transform: translateY(-1px); }
 .sponsor-link { font-size: var(--text-xs); color: var(--marker); font-weight: 600; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sponsor.house { background: var(--sheet); box-shadow: none; border: 1px dashed var(--line); }
 .sponsor.house .btn { justify-self: start; margin-top: 4px; text-decoration: none; }
+.sp-wrap { position: relative; display: grid; }
+.sp-close {
+  position: absolute; top: 8px; right: 8px; width: 24px; height: 24px; display: grid; place-items: center; padding: 0;
+  border: 0; border-radius: 8px; background: none; font-size: .6875rem; color: var(--faint); opacity: .6; transition: opacity .15s, background .15s, color .15s;
+}
+.sp-close:hover, .sp-close:focus-visible { opacity: 1; background: var(--pressed); color: var(--ink-2); }
 @media (min-width: 1200px) {
   #rail {
     position: fixed; top: calc(var(--topbar-h, 56px) + 32px); left: calc(50% + 320px + 32px); width: 240px;

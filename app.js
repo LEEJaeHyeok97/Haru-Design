@@ -1969,15 +1969,27 @@ function sponsorCardHtml(s, { preview = false } = {}) {
     <strong>${esc(s.title)}</strong>${s.body ? `<p>${esc(s.body)}</p>` : ''}
     <span class="sponsor-link">${esc((s.link_url || '').replace(/^https?:\/\/(www\.)?/i, '').split('/')[0])} ↗</span></a>`;
 }
+// 사용자가 끈 광고는 그날(한국 시간) 동안만 이 브라우저에서 숨긴다. 'house' 는 광고 문의 안내 카드.
+const SPONSOR_OFF_KEY = 'harusolgye-sponsor-off';
+let sponsorOff = { date: '', ids: [] };
+try { sponsorOff = JSON.parse(localStorage.getItem(SPONSOR_OFF_KEY)) || sponsorOff; } catch { /* 이번 방문 동안만 기억 */ }
+const sponsorIsOff = (id) => sponsorOff.date === kstDate() && sponsorOff.ids.includes(String(id));
+function closeSponsor(id) {
+  const today = kstDate();
+  sponsorOff = { date: today, ids: [...(sponsorOff.date === today ? sponsorOff.ids : []), String(id)] };
+  try { localStorage.setItem(SPONSOR_OFF_KEY, JSON.stringify(sponsorOff)); } catch { /* 이번 방문 동안만 기억 */ }
+}
+const sponsorCloseBtn = (id) => `<button class="sp-close" type="button" data-act="sponsor-close" data-id="${id}" aria-label="오늘은 이 광고 그만 보기" title="오늘은 그만 보기">✕</button>`;
 function renderRail() {
   const rail = $('#rail');
   if (!rail) return;
   const show = state.view !== 'admin' && !state.composing;
   rail.hidden = !show;
-  const live = state.sponsors.filter((s) => s.active);
+  const all = state.sponsors.filter((s) => s.active);
+  const live = all.filter((s) => !sponsorIsOff(s.id));
   rail.innerHTML = !show ? ''
-    : bookmarksHtml() + (live.length ? `${live.map((s) => sponsorCardHtml(s)).join('')}<a class="sponsor-ask" href="${CONTACT_HREF}">광고 문의</a>`
-    : sponsorCardHtml(null));
+    : bookmarksHtml() + (live.length ? `${live.map((s) => `<div class="sp-wrap">${sponsorCardHtml(s)}${sponsorCloseBtn(s.id)}</div>`).join('')}<a class="sponsor-ask" href="${CONTACT_HREF}">광고 문의</a>`
+    : all.length || sponsorIsOff('house') ? '' : `<div class="sp-wrap">${sponsorCardHtml(null)}${sponsorCloseBtn('house')}</div>`);
 }
 // 스폰서 위 즐겨찾기한 문제 목록. 아직 공개 전이거나 지워진 문제는 뺀다.
 function bookmarksHtml() {
@@ -2661,6 +2673,7 @@ document.addEventListener('click', async (ev) => {
   if (act === 'tl-only') { state.timeline.only = el.dataset.type && state.timeline.only !== el.dataset.type ? el.dataset.type : null; return renderTimeline(); }
   if (act === 'tl-fail') { state.timeline.failOnly = el.checked; return renderTimeline(); }
   if (act === 'subscribers-refresh') return loadSubscribers();
+  if (act === 'sponsor-close') { closeSponsor(el.dataset.id); renderRail(); return toast('오늘은 이 광고를 그만 보여드릴게요'); }
   if (act === 'sponsor-click') { track('sponsor_click', String(el.dataset.id)); return; }
   if (act === 'sponsor-edit') {
     resetSponsorForm();
