@@ -1936,20 +1936,18 @@ const CONTACT_EMAIL = 'hazardous10@naver.com';
 const CONTACT_HREF = `mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent('하루설계 스폰서 문의')}`;
 const safeLink = (url) => (/^https?:\/\//i.test(url || '') ? url : '#');
 // 이미지 비율: 원본 비율이 기본이라 잘리지 않는다. 비율을 고르면 꽉 채우기(보일 위치 선택) 또는 전체 보이기.
-const SP_RATIOS = [['auto', '원본 비율'], ['1.91', '가로형'], ['4/3', '4:3'], ['1', '정사각']];
 const SP_FITS = [['cover', '꽉 채우기'], ['contain', '전체 보이기']];
 function spStyle(raw) {
   const r = raw && typeof raw === 'object' ? raw : {};
   const pct = (v) => Math.max(0, Math.min(100, Math.round(Number(v ?? 50)))) || 0;
   return {
-    ratio: SP_RATIOS.some(([k]) => k === r.ratio) ? r.ratio : 'auto',
+    ratio: '1.91',   // 오른쪽 칸 맨 위에 가로로 긴 배너로만 보여서 비율은 고정
     fit: r.fit === 'contain' ? 'contain' : 'cover',
     x: pct(r.x), y: pct(r.y),
   };
 }
 function spImgStyle(raw) {
   const st = spStyle(raw);
-  if (st.ratio === 'auto') return '';
   return `aspect-ratio:${st.ratio};object-fit:${st.fit};object-position:${st.x}% ${st.y}%`;
 }
 const bySponsorOrder = (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || b.created_at.localeCompare(a.created_at);
@@ -1963,9 +1961,13 @@ function sponsorCardHtml(s, { preview = false } = {}) {
       <a class="btn small" href="${CONTACT_HREF}">광고 문의</a></div>`;
   }
   const st = spStyle(s.image_style);
+  // 이미지가 있으면 글 없이 가로로 긴 배너로만 보인다
+  if (s.image_url) {
+    return `<a class="sponsor banner" href="${esc(safeLink(s.link_url))}" target="_blank" rel="sponsored noopener" title="${esc(s.title)}" ${preview ? 'tabindex="-1"' : `data-act="sponsor-click" data-id="${s.id}"`}>
+      <img class="${st.fit}" src="${esc(s.image_url)}" alt="${esc(s.title)}" loading="lazy" style="${spImgStyle(st)}"><span class="sponsor-label">스폰서</span></a>`;
+  }
   return `<a class="sponsor" href="${esc(safeLink(s.link_url))}" target="_blank" rel="sponsored noopener" ${preview ? 'tabindex="-1"' : `data-act="sponsor-click" data-id="${s.id}"`}>
     <span class="sponsor-label">스폰서</span>
-    ${s.image_url ? `<img class="${st.ratio === 'auto' ? 'natural' : st.fit}" src="${esc(s.image_url)}" alt="" loading="lazy" style="${spImgStyle(st)}">` : ''}
     <strong>${esc(s.title)}</strong>${s.body ? `<p>${esc(s.body)}</p>` : ''}
     <span class="sponsor-link">${esc((s.link_url || '').replace(/^https?:\/\/(www\.)?/i, '').split('/')[0])} ↗</span></a>`;
 }
@@ -1976,10 +1978,10 @@ function renderRail() {
   rail.hidden = !show;
   const live = state.sponsors.filter((s) => s.active);
   rail.innerHTML = !show ? ''
-    : bookmarksHtml() + (live.length ? `${live.map((s) => sponsorCardHtml(s)).join('')}<a class="sponsor-ask" href="${CONTACT_HREF}">광고 문의</a>`
-    : sponsorCardHtml(null));
+    : (live.length ? `${live.map((s) => sponsorCardHtml(s)).join('')}<a class="sponsor-ask" href="${CONTACT_HREF}">광고 문의</a>`
+    : sponsorCardHtml(null)) + bookmarksHtml();
 }
-// 스폰서 위 즐겨찾기한 문제 목록. 아직 공개 전이거나 지워진 문제는 뺀다.
+// 스폰서 아래 즐겨찾기한 문제 목록. 아직 공개 전이거나 지워진 문제는 뺀다.
 function bookmarksHtml() {
   const byId = new Map(publishedTopics().map((t) => [String(t.id), t]));
   const list = bookmarks.map((id) => byId.get(id)).filter(Boolean);
@@ -2054,12 +2056,10 @@ function spImageCtrlHtml() {
       ${img ? '<button class="btn ghost small danger" type="button" data-act="sponsor-remove-image">이미지 빼기</button>' : ''}
     </div>
     ${img ? `
-      <div class="sp-opt"><span>비율</span>${seg('ratio', SP_RATIOS, st.ratio)}</div>
-      <div class="sp-opt ${st.ratio === 'auto' ? 'is-idle' : ''}"><span>맞춤</span>${seg('fit', SP_FITS, st.ratio === 'auto' ? '' : st.fit)}</div>
-      <div class="sp-opt sp-focus-opt ${st.ratio === 'auto' || st.fit === 'contain' ? 'is-idle' : ''}"><span>보일 위치</span>
+      <div class="sp-opt"><span>맞춤</span>${seg('fit', SP_FITS, st.fit)}</div>
+      <div class="sp-opt sp-focus-opt ${st.fit === 'contain' ? 'is-idle' : ''}"><span>보일 위치</span>
         <div class="sp-focus" id="sp-focus" title="보이게 할 부분을 누르거나 끌어 주세요"><img src="${esc(img)}" alt="" draggable="false"><i style="left:${st.x}%;top:${st.y}%"></i></div>
-        <small>${st.ratio === 'auto' ? '지금은 원본 비율이라 잘리지 않아요. 위치를 누르면 가로형으로 바꾸고 그 부분이 보이게 잘라요.'
-          : st.fit === 'contain' ? '지금은 전체 보이기라 잘리지 않고 남는 곳은 여백이에요. 위치를 누르면 꽉 채우기로 바꿔요.'
+        <small>${st.fit === 'contain' ? '지금은 전체 보이기라 잘리지 않고 남는 곳은 여백이에요. 위치를 누르면 꽉 채우기로 바꿔요.'
           : '사진에서 꼭 보여야 할 부분을 누르거나 끌어 주세요.'}</small></div>` : ''}
   </div>`;
 }
@@ -2140,10 +2140,10 @@ document.addEventListener('pointerdown', (ev) => {
   if (!ev.target.closest('#sp-focus')) return;
   ev.preventDefault();
   spFocus.dragging = true;
-  // 잘리지 않는 상태에서 위치를 고르면 자르는 모드(가로형 · 꽉 채우기)로 바꾼 뒤 위치를 정한다
+  // 전체 보이기에서 위치를 고르면 꽉 채우기로 바꾼 뒤 위치를 정한다
   const e = spEditing(), st = spStyle(e.image_style);
-  if (st.ratio === 'auto' || st.fit === 'contain') {
-    e.image_style = { ...st, ratio: st.ratio === 'auto' ? '1.91' : st.ratio, fit: 'cover' };
+  if (st.fit === 'contain') {
+    e.image_style = { ...st, fit: 'cover' };
     renderSponsorImageCtrl();
   }
   spSetFocus(ev);
@@ -2677,8 +2677,6 @@ document.addEventListener('click', async (ev) => {
   if (act === 'sp-style') {
     const e = spEditing();
     const next = { ...spStyle(e.image_style), [el.dataset.k]: el.dataset.v };
-    // 원본 비율에서 맞춤을 고르면 자를 비율이 필요하니 가로형으로 바꾼다
-    if (el.dataset.k === 'fit' && next.ratio === 'auto') next.ratio = '1.91';
     e.image_style = spStyle(next);
     return renderSponsorImageCtrl();
   }
