@@ -906,9 +906,10 @@ function sheetHtml(topic, { isToday }) {
   </section>`;
 }
 
+const STAR = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z" stroke-width="1.8" stroke-linejoin="round"/></svg>';
 function bookmarkBtn(topic) {
   const on = isBookmarked(topic.id);
-  return `<button class="bookmark-btn" type="button" data-act="bookmark" data-id="${topic.id}" aria-pressed="${on}">${on ? '★ 즐겨찾기함' : '☆ 즐겨찾기'}</button>`;
+  return `<button class="bookmark-btn" type="button" data-act="bookmark" data-id="${topic.id}" aria-pressed="${on}" aria-label="즐겨찾기" title="${on ? '즐겨찾기에서 빼기' : '즐겨찾기'}">${STAR}</button>`;
 }
 
 /* ---------- composer ---------- */
@@ -1973,17 +1974,17 @@ function renderRail() {
   rail.hidden = !show;
   const live = state.sponsors.filter((s) => s.active);
   rail.innerHTML = !show ? ''
-    : (live.length ? `${live.map((s) => sponsorCardHtml(s)).join('')}<a class="sponsor-ask" href="${CONTACT_HREF}">광고 문의</a>`
-    : sponsorCardHtml(null)) + bookmarksHtml();
+    : bookmarksHtml() + (live.length ? `${live.map((s) => sponsorCardHtml(s)).join('')}<a class="sponsor-ask" href="${CONTACT_HREF}">광고 문의</a>`
+    : sponsorCardHtml(null));
 }
-// 스폰서 아래 즐겨찾기한 문제 목록. 아직 공개 전이거나 지워진 문제는 뺀다.
+// 스폰서 위 즐겨찾기한 문제 목록. 아직 공개 전이거나 지워진 문제는 뺀다.
 function bookmarksHtml() {
   const byId = new Map(publishedTopics().map((t) => [String(t.id), t]));
   const list = bookmarks.map((id) => byId.get(id)).filter(Boolean);
   return `<div class="feed bookmarks"><h2>즐겨찾기</h2>${list.length
     ? list.map((t) => `<button class="feed-item" type="button" data-topic="${t.id}" ${String(t.id) === String(state.topicId) && state.view !== 'archive' ? 'aria-current="true"' : ''}>
         <span class="what">${esc(t.title)}</span><span class="when">${fmtDate(t.publish_date)} (${weekday(t.publish_date)})</span></button>`).join('')
-    : '<p class="hint">문제 위의 ☆ 즐겨찾기를 누르면 여기에 모여요.</p>'}</div>`;
+    : '<p class="hint">문제 오른쪽 위의 별을 누르면 여기에 모여요.</p>'}</div>`;
 }
 
 /* ---------- 최근 활동 칸 ---------- */
