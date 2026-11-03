@@ -4,6 +4,7 @@
   "functions": {
     "api/review.js": { "maxDuration": 60 },
     "api/diagram.js": { "maxDuration": 60 },
+    "api/interview.js": { "maxDuration": 60 },
     "api/newsletter.js": { "maxDuration": 60 }
   },
   "crons": [

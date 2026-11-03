@@ -10,6 +10,7 @@
 
 - **오늘의 문제 / 지난 문제**: 날짜별로 문제 하나. 관리자가 미래 날짜로 예약 등록
 - **설계 올리기**: 템플릿 글 + 다이어그램 (캔버스로 그리기 또는 이미지 첨부). 한 문제에 한 번
+- **AI와 대화하며 쓰기**: 글쓰기를 누르면 '직접 쓰기'와 'AI와 대화하며 쓰기' 중 고름(쓰는 중에도 바꿀 수 있음). AI가 면접관처럼 하나씩 묻고, 답할 때마다 캔버스 그림이 바뀜(새로 생기거나 바뀐 카드를 잠깐 강조, 대화에 바뀐 것 표시). 캔버스를 직접 고치면 다음 답부터 AI가 그 그림을 이어 받음. '글로 정리하기'를 누르면 대화를 템플릿 글로 옮겨 직접 쓰기 화면에서 다듬고 올림. 대화는 저장하지 않음
 - **설계 캔버스**: 컴포넌트 25종 + 직접 추가, 드래그·연결, 동기/비동기, 2중화, Ctrl/Cmd+Z 되돌리기 · Ctrl/Cmd+Shift+Z 다시 하기. 올릴 때 PNG로 변환
 - **AI 평가**: 올리기 전에 점수(100점)와 기준별 피드백. 저장하지 않고 작성자에게만 표시
 - **AI 아키텍처**: 다이어그램 없이 글만 올린 답안은 백그라운드에서 Claude가 글을 읽고 캔버스 형식의 그림을 그려 붙임. 글마다 한 번만 만들어 DB에 저장하고 'AI' 표시와 함께 보여줌
@@ -26,6 +27,7 @@ index.html     마크업
 styles.css     스타일
 app.js         앱 로직 전부 (Supabase API, 데모 모드, 캔버스, 렌더링, 이벤트)
 api/review.js  AI 평가 서버 함수 (Vercel Function, @anthropic-ai/sdk)
+api/interview.js AI와 대화하며 쓰기 서버 함수 (다음 질문 + 고친 그림, 끝나면 글로 정리)
 api/diagram.js AI 아키텍처 서버 함수 (글 → 다이어그램, 결과를 posts에 저장)
 api/newsletter.js 매일 문제 메일 발송 (Vercel Cron, Gmail SMTP), ?preview 로 오늘 메일 미리 보기
 api/unsubscribe.js 메일의 구독 취소 링크
@@ -39,7 +41,7 @@ vercel.json    헤더, cleanUrls, 함수 실행 시간(60초)
 npx serve .
 ```
 
-정적 파일만 뜨므로 `/api/review`, `/api/diagram`(AI 기능)은 동작하지 않습니다. 함수까지 돌리려면 `npx vercel dev`를 쓰세요.
+정적 파일만 뜨므로 `/api/review`, `/api/diagram`, `/api/interview`(AI 기능)은 동작하지 않습니다. 데모 모드에서는 AI 대화가 정해진 질문으로 흉내 내어 동작합니다. 함수까지 돌리려면 `npx vercel dev`를 쓰세요.
 
 `app.js`의 `CONFIG.SUPABASE_URL`을 비우면 **데모 모드**(브라우저 localStorage, 예시 데이터, 관리자 코드 `admin`)로 동작해 운영 DB를 건드리지 않고 테스트할 수 있습니다.
 
@@ -58,6 +60,7 @@ npx serve .
 
 `supabase/` 안의 SQL은 자동 적용되지 않습니다. Supabase 대시보드 > SQL Editor에서 직접 실행하세요.
 
+- `2026-11-03-ai-interview.sql`: 운영 지표 `events.type`에 `ai_interview`(AI 대화) 추가
 - `2026-10-28-subscriber-count.sql`: 상단 구독 공지에 보이는 구독자 수 함수 `subscriber_count()`(숫자만 공개)
 - `2026-10-28-newsletter.sql`: 문제 메일 발송 기록 `newsletter_sends`(문제마다 한 번만 보내기, 관리자만 보기)
 - `2026-10-26-ai-score.sql`: 올라온 글의 AI 점수 `posts.ai_score`·`ai_review` 컬럼과 보호 트리거

@@ -233,6 +233,18 @@ async function createSupabaseApi(onAuthChange) {
       if (!r.ok) throw Object.assign(new Error(data.error || 'AI 평가를 받지 못했어요. 잠시 뒤 다시 시도해 주세요.'), { status: r.status });
       return data;
     },
+    // AI와 대화하며 쓰기 (/api/interview). { finish } 가 없으면 다음 질문과 고친 그림, 있으면 정리한 글을 준다.
+    async interview(payload) {
+      const token = (await sb.auth.getSession()).data.session?.access_token;
+      const r = await fetch('/api/interview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token || ''}` },
+        body: JSON.stringify(payload),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw Object.assign(new Error(data.error || 'AI 답을 받지 못했어요. 잠시 뒤 다시 시도해 주세요.'), { status: r.status });
+      return data;
+    },
     // 올라온 글을 AI 가 채점한다 (/api/review 에 postId). 결과는 서버가 저장하므로 로그인이 필요 없다.
     // 돌려주는 값: { status: 'done', score, review } | { status: 'pending' | 'failed' }
     async scorePost(postId) {
@@ -517,6 +529,37 @@ function demoDiagram(content) {
   return { nodes, edges, seq: nodes.length + edges.length };
 }
 
+// 데모용 AI 대화: 정해진 질문을 차례로 묻고, 지금까지 답에 나온 낱말로 그림을 만든다 (api/interview.js 와 같은 모양)
+const DEMO_QUESTIONS = [
+  ['좋아요. 그 규모라면 요청은 어디로 먼저 들어오나요? 서버 앞에 로드 밸런서나 게이트웨이를 둘지 정해 볼까요?', ['로드 밸런서 뒤에 API 서버 여러 대', 'API 서버 한 대로 시작할게요']],
+  ['데이터는 어디에 저장하나요? 읽기가 많다면 캐시도 생각해 볼 수 있어요.', ['MySQL에 저장하고 Redis 캐시', 'NoSQL 하나로 충분해요']],
+  ['오래 걸리는 작업은 요청 안에서 처리하나요, 큐로 넘기나요?', ['Kafka로 넘기고 워커가 처리', '요청 안에서 바로 처리해요']],
+  ['가장 먼저 병목이 될 곳은 어디라고 보시나요? 그리고 이번 설계에서 일부러 포기한 것도 알려 주세요.', []],
+];
+function demoInterview({ messages, diagram: cur, finish }) {
+  const mine = messages.filter((m) => m.role === 'me').map((m) => m.text);
+  const all = mine.join('\n');
+  if (finish) {
+    const list = (cur?.nodes || []).map((n) => `- ${n.label}`).join('\n');
+    return { content: `## 요구사항 가정\n- ${mine[0] || ''}\n\n## 핵심 구성 요소\n${list}\n\n## 선택한 방식과 이유\n${mine.slice(1, -1).map((t) => `- ${t}`).join('\n')}\n\n## 포기한 것\n- ${mine.length > 1 ? mine[mine.length - 1] : ''}\n` };
+  }
+  const d = demoDiagram(all);
+  if (!d) {
+    // 아직 그릴 게 없으면 지금 그림을 그대로 돌려준다 (사용자가 직접 그린 것도 지우지 않도록)
+    const [reply, choices] = DEMO_QUESTIONS[mine.length - 1] || DEMO_QUESTIONS[0];
+    return { reply, choices, ready: false, nodes: (cur?.nodes || []).map((n) => ({ ...n, col: 0, row: 0 })), edges: cur?.edges || [] };
+  }
+  const byType = new Map((cur?.nodes || []).map((n) => [n.type, n.id]));
+  const ids = new Map(d.nodes.map((n, i) => [n.id, byType.get(n.type) || 'new' + (i + 1)]));
+  const many = /여러 ?대|2중화|이중화/.test(all);
+  const [reply, choices] = DEMO_QUESTIONS[mine.length - 1] || ['충분히 모였어요. 아래 \'글로 정리하기\'를 누르면 지금까지 내용을 글로 옮겨 드려요.', []];
+  return {
+    reply, choices, ready: mine.length > DEMO_QUESTIONS.length,
+    nodes: d.nodes.map((n) => ({ id: ids.get(n.id), type: n.type, kind: 'compute', label: n.label, col: Math.min(4, Math.round((n.x - 24) / 250)), row: Math.round((n.y - 24) / 100), dup: many && n.type === 'api' })),
+    edges: d.edges.map((e) => ({ from: ids.get(e.from), to: ids.get(e.to), label: '', async: e.async })),
+  };
+}
+
 // supabase/2026-10-25-admin-timeline.sql 의 admin_timeline() 과 같은 모양으로 모은다
 function aggregateTimeline(events, hours) {
   hours = hours <= 24 ? 24 : hours <= 168 ? 168 : 720;
@@ -640,6 +683,10 @@ function createDemoApi() {
       ].filter((x) => x.at >= since);
     },
     async review() { throw new Error('AI 평가는 데모 모드에서는 쓸 수 없어요.'); },
+    async interview(payload) {
+      await new Promise((r) => setTimeout(r, 600));
+      return demoInterview(payload);
+    },
     // 데모에서는 Claude 대신 글 길이와 단락으로 그럴듯한 점수를 만든다
     async scorePost(postId) {
       await new Promise((r) => setTimeout(r, 2000));
@@ -735,6 +782,8 @@ const state = {
   dgMode: 'canvas',       // canvas | image
   editingTopic: null,
   composing: false,       // 작성 폼 열림 여부
+  composeMode: null,      // 작성 방식: null(고르는 화면) | write(직접 쓰기) | chat(AI와 대화하며 쓰기)
+  chat: null,             // AI 대화: { topicId, log: [{ role: 'ai'|'me', text, choices, changes }], input, loading, error, ready, finishing, lastDraft }
   busy: false,
   review: null,           // AI 평가: { loading } | { result } | { error }
   metrics: null,          // 관리자 지표: { days, data, loading, error }
@@ -917,18 +966,50 @@ function bookmarkBtn(topic) {
 /* ---------- composer ---------- */
 const PENCIL = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z M13.5 6.5l4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
 
-/* 화면을 밀어내지 않도록 떠 있는 버튼 → 떠 있는 작성 시트로 연다 */
+/* 화면을 밀어내지 않도록 떠 있는 버튼 → 떠 있는 작성 시트로 연다.
+   시트를 처음 열면 직접 쓰기 / AI와 대화하며 쓰기 중 하나를 고르고, 쓰는 중에도 위에서 바꿀 수 있다.
+   두 방식은 같은 글(state.draft)과 같은 캔버스(state.diagram)를 쓴다. */
 function composerHtml(topic) {
   if (myPost()) return '';
   if (!state.composing) return `<button class="btn primary fab" type="button" data-act="compose" aria-label="설계 작성하기">${PENCIL}<span>설계 작성하기</span></button>`;
+  const mode = state.composeMode;
+  const seg = mode ? `<div class="seg compose-modes" role="group" aria-label="작성 방식">
+      <button type="button" data-act="compose-mode" data-mode="chat" aria-pressed="${mode === 'chat'}">AI와 대화</button>
+      <button type="button" data-act="compose-mode" data-mode="write" aria-pressed="${mode === 'write'}">직접 쓰기</button>
+    </div>` : '';
+  const body = !mode ? composePickHtml() : mode === 'chat' ? chatComposeHtml() : writeComposeHtml();
   return `
   <div class="overlay compose-overlay" data-act="backdrop-compose">
-  <section class="panel compose-sheet" role="dialog" aria-modal="true" aria-labelledby="composer-title">
+  <section class="panel compose-sheet${mode === 'chat' ? ' wide' : ''}" role="dialog" aria-modal="true" aria-labelledby="composer-title">
     <div class="compose-head">
       <h2 id="composer-title">내 설계 올리기</h2>
+      ${seg}
       <button class="btn ghost small" type="button" data-act="cancel-compose" aria-label="닫기" ${state.busy ? 'disabled' : ''}>✕</button>
     </div>
     <details class="compose-ref"><summary>문제 다시 보기 · ${esc(topic.title)}</summary><p>${esc(topic.description)}</p></details>
+    ${body}
+  </section>
+  </div>`;
+}
+
+function composePickHtml() {
+  return `
+    <p class="hint">어떻게 쓸지 골라 주세요. 쓰는 중에도 위에서 바꿀 수 있어요.</p>
+    <div class="compose-pick">
+      <button class="pick-card" type="button" data-act="compose-mode" data-mode="chat">
+        <span class="pick-badge">새 기능</span>
+        <b>AI와 대화하며 쓰기</b>
+        <span>AI가 면접관처럼 하나씩 물어봐요. 답할 때마다 아키텍처 그림이 같이 바뀌고, 끝나면 글로 정리해 줘요.</span>
+      </button>
+      <button class="pick-card" type="button" data-act="compose-mode" data-mode="write">
+        <b>직접 쓰기</b>
+        <span>템플릿에 맞춰 글을 쓰고, 캔버스에 직접 그리거나 이미지를 올려요.</span>
+      </button>
+    </div>`;
+}
+
+function writeComposeHtml() {
+  return `
     <p class="hint">정답은 없어요. 무엇을 고르고 무엇을 포기했는지가 핵심이에요. 빈 칸은 지워도 됩니다.</p>
     <form class="composer-grid" id="composer">
       ${state.me
@@ -945,9 +1026,146 @@ function composerHtml(topic) {
         <button class="btn ghost" type="button" data-act="cancel-compose" ${state.busy ? 'disabled' : ''}>닫기</button>
         <button class="btn primary" type="submit" ${state.busy ? 'disabled' : ''}>${state.busy ? '올리는 중…' : '설계 올리기'}</button>
       </div>
-    </form>
-  </section>
-  </div>`;
+    </form>`;
+}
+
+/* ---------- AI와 대화하며 쓰기 ---------- */
+// 대화는 저장하지 않는다. 그림은 캔버스(state.diagram)에 바로 그리고, 끝나면 글을 state.draft 로 옮겨 직접 쓰기 화면에서 다듬어 올린다.
+function chatStart() {
+  const t = currentTopic();
+  state.chat = {
+    topicId: state.topicId, input: '', loading: false, error: null, ready: false, finishing: false, lastDraft: null,
+    log: [{
+      role: 'ai',
+      text: `'${t?.title || '오늘의 문제'}' 설계를 같이 정리해 볼게요. 제가 하나씩 여쭤보면 편하게 답해 주세요. 답할 때마다 그림을 같이 그려 드려요.\n\n먼저 규모부터 정해 볼까요? 사용자 수나 초당 요청 수, 읽기와 쓰기 중 어느 쪽이 많은지 알려 주세요.`,
+      choices: ['하루 100만 명 정도, 읽기가 훨씬 많아요', '잘 모르겠어요. 흔한 가정을 알려 주세요'],
+    }],
+  };
+}
+
+const CHANGE_LABEL = { add: '+', del: '−', edit: '수정' };
+function chatLogHtml() {
+  const c = state.chat;
+  const last = c.log.length - 1;
+  const items = c.log.map((m, i) => {
+    if (m.role === 'me') return `<div class="chat-msg me"><p>${esc(m.text)}</p></div>`;
+    const changes = (m.changes || []).slice(0, 8);
+    const canPick = i === last && !c.loading && !c.finishing && m.choices?.length;
+    return `<div class="chat-msg ai">
+      <span class="chat-ava" aria-hidden="true">AI</span>
+      <div class="chat-body">
+        ${changes.length ? `<button class="chat-changes" type="button" data-act="chat-see-canvas" title="그림에서 보기" aria-label="그림에서 바뀐 것 보기">${changes.map((x) => `<span class="chg ${x.op}">${CHANGE_LABEL[x.op]} ${esc(x.label)}</span>`).join('')}</button>` : ''}
+        <p>${esc(m.text)}</p>
+        ${canPick ? `<div class="chat-choices">${m.choices.map((t) => `<button class="btn small" type="button" data-act="chat-choice" data-text="${esc(t)}">${esc(t)}</button>`).join('')}</div>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+  const wait = c.loading ? '<div class="chat-msg ai"><span class="chat-ava" aria-hidden="true">AI</span><div class="chat-body"><p class="chat-typing" aria-label="답을 쓰는 중"><i></i><i></i><i></i></p></div></div>' : '';
+  const err = c.error ? `<div class="chat-err" role="alert"><span>${esc(c.error)}</span><button class="btn small" type="button" data-act="chat-retry">다시 보내기</button></div>` : '';
+  return items + wait + err;
+}
+
+function chatFinishLabel() {
+  const c = state.chat;
+  return c.finishing ? '글로 옮기는 중…' : '글로 정리하기';
+}
+
+function chatComposeHtml() {
+  const c = state.chat;
+  const answered = c.log.some((m) => m.role === 'me');
+  return `
+    <div class="chat-layout">
+      <div class="chat-col">
+        <div class="chat-log" id="chat-log" aria-live="polite">${chatLogHtml()}</div>
+        <form class="chat-form" id="chat-form">
+          <textarea id="chat-input" aria-label="답 적기" rows="2" maxlength="1500" placeholder="답을 적어 주세요 · Enter로 보내기, Shift+Enter로 줄바꿈">${esc(c.input)}</textarea>
+          <button class="btn primary small" type="submit" ${c.loading || c.finishing ? 'disabled' : ''}>보내기</button>
+        </form>
+      </div>
+      <div class="chat-canvas">${dgShellHtml({ tabs: false })}</div>
+    </div>
+    <div class="actions">
+      <span class="note">그림은 직접 고쳐도 돼요. 다음 답부터 AI가 고친 그림을 보고 이어 가요.</span>
+      <button class="btn ghost" type="button" data-act="chat-reset" ${c.loading || c.finishing || !answered ? 'disabled' : ''}>처음부터</button>
+      <button class="btn ${c.ready ? 'primary' : ''}" type="button" data-act="chat-finish" ${c.loading || c.finishing || !answered ? 'disabled' : ''}>${chatFinishLabel()}</button>
+    </div>`;
+}
+
+// 대화 칸만 다시 그린다 (입력 중인 글과 캔버스를 건드리지 않도록)
+function renderChat() {
+  const log = $('#chat-log');
+  if (!log || !state.chat) return;
+  const c = state.chat, busy = c.loading || c.finishing, answered = c.log.some((m) => m.role === 'me');
+  log.innerHTML = chatLogHtml();
+  log.scrollTop = log.scrollHeight;
+  const send = $('#chat-form [type="submit"]'); if (send) send.disabled = busy;
+  const fin = $('[data-act="chat-finish"]');
+  if (fin) { fin.disabled = busy || !answered; fin.textContent = chatFinishLabel(); fin.classList.toggle('primary', !!c.ready); }
+  const reset = $('[data-act="chat-reset"]'); if (reset) reset.disabled = busy || !answered;
+}
+
+const dgForAi = () => ({
+  nodes: state.diagram.nodes.map((n) => ({ id: n.id, type: n.type, kind: n.kind, label: n.label, dup: !!n.dup })),
+  edges: state.diagram.edges.map((e) => ({ from: e.from, to: e.to, label: e.label || '', async: !!e.async })),
+});
+const chatPayload = (extra = {}) => {
+  const t = currentTopic();
+  return { topic: { title: t.title, description: t.description }, messages: state.chat.log.map((m) => ({ role: m.role, text: m.text })), diagram: dgForAi(), ...extra };
+};
+
+async function chatSend(text) {
+  const c = state.chat;
+  text = String(text || '').trim();
+  if (!c || !text || c.loading || c.finishing) return;
+  c.log.push({ role: 'me', text });
+  c.input = '';
+  const input = $('#chat-input'); if (input) input.value = '';
+  return chatTurn();
+}
+
+async function chatTurn() {
+  const c = state.chat;
+  if (!c || !currentTopic()) return;
+  c.loading = true; c.error = null; renderChat();
+  const started = performance.now();
+  try {
+    const r = await api.interview(chatPayload());
+    track('ai_interview', 'turn', { status: 200, duration_ms: Math.round(performance.now() - started) });
+    const { fresh, changes } = dgMutate(() => dgApplyAi(r));
+    c.log.push({ role: 'ai', text: r.reply, choices: r.choices || [], changes });
+    c.ready = c.ready || !!r.ready;
+    dgFlash(fresh);
+  } catch (e) {
+    track('ai_interview', 'turn', { status: e.status || 500, duration_ms: Math.round(performance.now() - started) });
+    c.error = friendlyError(e);
+  }
+  c.loading = false;
+  renderChat();
+  if ($('#dg-svg')) dgRender();
+  $('#chat-input')?.focus({ preventScroll: true });
+}
+
+async function chatFinish(btn) {
+  const c = state.chat;
+  if (!c || c.loading || c.finishing) return;
+  // 직접 쓰기에서 써 둔 글이 있으면 한 번 더 눌러야 바꾼다
+  if (meaningful(state.draft) && state.draft !== c.lastDraft && !confirmed(btn, '한 번 더 누르면 써 둔 글을 바꿔요')) return;
+  c.finishing = true; renderChat();
+  const started = performance.now();
+  try {
+    const r = await api.interview(chatPayload({ finish: true }));
+    track('ai_interview', 'finish', { status: 200, duration_ms: Math.round(performance.now() - started) });
+    state.draft = r.content; c.lastDraft = r.content;
+    if (state.diagram.nodes.length) state.dgMode = 'canvas';
+    state.review = null; state.composeMode = 'write'; c.finishing = false;
+    render();
+    $('#post-content')?.focus({ preventScroll: true });
+    return toast('대화를 글로 정리했어요. 다듬은 뒤 올려 주세요');
+  } catch (e) {
+    track('ai_interview', 'finish', { status: e.status || 500, duration_ms: Math.round(performance.now() - started) });
+    toast(friendlyError(e));
+  }
+  c.finishing = false; renderChat();
 }
 
 /* ---------- AI 평가 ---------- */
@@ -1127,7 +1345,7 @@ function dgEdgeGeom(e, d) {
   return { p, q, mx: (p.x + q.x) / 2, my: (p.y + q.y) / 2 };
 }
 
-function dgSvgBody(d, { sel = null, connectFrom = null, forExport = false } = {}) {
+function dgSvgBody(d, { sel = null, connectFrom = null, forExport = false, fresh = null } = {}) {
   let s = '', labels = '';
   for (const e of d.edges) {
     const g = dgEdgeGeom(e, d);
@@ -1151,6 +1369,7 @@ function dgSvgBody(d, { sel = null, connectFrom = null, forExport = false } = {}
     const stroke = on || from ? DG.BLUE : k.stroke;
     const dash = k.dashed ? 'stroke-dasharray="5 4"' : '';
     s += `<g class="dg-node" data-id="${n.id}" transform="translate(${n.x} ${n.y})">`;
+    if (fresh?.has(n.id)) s += `<rect class="dg-ring" x="-5" y="-5" width="${w + (n.dup ? 16 : 10)}" height="${h + (n.dup ? 16 : 10)}" rx="16" fill="none" stroke="${DG.BLUE}" stroke-width="3"/>`;
     if (n.dup) s += `<rect x="6" y="6" width="${w}" height="${h}" rx="12" fill="${k.fill}" stroke="${k.stroke}" stroke-width="1.4" opacity=".7" ${dash}/>`;
     s += `<rect width="${w}" height="${h}" rx="12" fill="${k.fill}" stroke="${stroke}" stroke-width="${on || from ? 2.5 : 1.6}" ${dash}/>`;
     s += `<rect x="10" y="${h / 2 - 9}" width="4" height="18" rx="2" fill="${k.chip}"/>`;
@@ -1172,12 +1391,13 @@ const dgDefs = () => `<defs>
 
 /* ---------- 편집 화면 ---------- */
 const UNDO_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 010 11H11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-function dgShellHtml() {
-  const mode = state.dgMode || 'canvas';
-  const tabs = `<div class="seg dg-tabs" role="group" aria-label="다이어그램 방식">
+// AI와 대화하며 쓰기에서는 { tabs: false } 로 캔버스만 보여 준다
+function dgShellHtml({ tabs: withTabs = true } = {}) {
+  const mode = withTabs ? state.dgMode || 'canvas' : 'canvas';
+  const tabs = withTabs ? `<div class="seg dg-tabs" role="group" aria-label="다이어그램 방식">
       <button type="button" data-dg-act="mode" data-mode="canvas" aria-pressed="${mode === 'canvas'}">캔버스로 그리기</button>
       <button type="button" data-dg-act="mode" data-mode="image" aria-pressed="${mode === 'image'}">이미지 올리기</button>
-    </div>`;
+    </div>` : '';
   if (mode === 'image') {
     return `<div class="field"><div class="dg-label-row"><label for="post-image">다이어그램 <span class="sub">선택</span></label>${tabs}</div>
       ${state.draftPreview
@@ -1185,7 +1405,7 @@ function dgShellHtml() {
         : `<label class="drop" id="drop" for="post-image">클릭하거나 이미지를 끌어다 놓으세요 · PNG, JPG, WEBP<input id="post-image" type="file" accept="image/*"></label>`}
     </div>`;
   }
-  return `<div class="field"><div class="dg-label-row"><span class="dg-title" id="dg-title">다이어그램 <span class="sub">선택</span></span>${tabs}</div>
+  return `<div class="field"><div class="dg-label-row"><span class="dg-title" id="dg-title">다이어그램 <span class="sub">${withTabs ? '선택' : '대화에 따라 같이 그려져요'}</span></span>${tabs}</div>
     <div class="dg" id="dg">
       <div class="dg-palette" role="toolbar" aria-label="컴포넌트 추가">
         <button type="button" class="dg-chip dg-chip-custom" data-dg-act="custom-open">+ 직접 추가</button>
@@ -1219,7 +1439,7 @@ function dgRender() {
   svg.setAttribute('viewBox', `0 0 ${dgView.w} ${dgView.h}`);
   svg.setAttribute('width', dgView.w); svg.setAttribute('height', dgView.h);
   for (const n of state.diagram.nodes) dgClamp(n);
-  $('#dg-layer').innerHTML = dgSvgBody(state.diagram, { sel: dgView.sel, connectFrom: dgView.connectFrom });
+  $('#dg-layer').innerHTML = dgSvgBody(state.diagram, { sel: dgView.sel, connectFrom: dgView.connectFrom, fresh: dgView.fresh });
   $('#dg-empty').hidden = state.diagram.nodes.length > 0;
   svg.classList.toggle('connecting', !!dgView.connectFrom);
   if (!dgView.ro) {
@@ -1234,7 +1454,7 @@ function dgRenderSvg() {
   if (!stage || !svg) return;
   const w = Math.max(320, Math.round(stage.clientWidth));
   if (w !== dgView.w) { dgView.w = w; dgView.h = w < 560 ? DG.H_NARROW : DG.H_WIDE; svg.setAttribute('viewBox', `0 0 ${w} ${dgView.h}`); svg.setAttribute('width', w); svg.setAttribute('height', dgView.h); for (const n of state.diagram.nodes) dgClamp(n); }
-  $('#dg-layer').innerHTML = dgSvgBody(state.diagram, { sel: dgView.sel, connectFrom: dgView.connectFrom });
+  $('#dg-layer').innerHTML = dgSvgBody(state.diagram, { sel: dgView.sel, connectFrom: dgView.connectFrom, fresh: dgView.fresh });
   $('#dg-empty').hidden = state.diagram.nodes.length > 0;
   svg.classList.toggle('connecting', !!dgView.connectFrom);
   dgRenderHistory();
@@ -1290,6 +1510,70 @@ function dgRenderBar() {
 function dgClamp(n) {
   n.x = Math.max(4, Math.min(dgView.w - dgNodeW(n) - (n.dup ? 12 : 6), n.x));
   n.y = Math.max(10, Math.min(dgView.h - DG.NODE_H - (n.dup ? 12 : 6), n.y));
+}
+
+/* AI 대화가 준 그림({ nodes: [{ id, type, kind, label, col, row, dup }], edges })을 캔버스에 반영한다.
+   이미 있던 카드는 자리를 그대로 두고(사용자가 옮긴 자리 유지), 새 카드만 격자 칸에 놓는다.
+   dgMutate 안에서 불러야 되돌리기에 남는다. 돌려주는 값: { fresh: 강조할 카드 id, changes: 바뀐 것 목록 } */
+function dgApplyAi(r) {
+  const d = state.diagram;
+  const list = Array.isArray(r?.nodes) ? r.nodes.slice(0, 14) : [];
+  // 아무것도 안 왔으면 지우지 않고 그대로 둔다
+  if (!list.length) return { fresh: new Set(), changes: [] };
+  const old = new Map(d.nodes.map((n) => [n.id, n]));
+  // 넓은 화면은 왼쪽→오른쪽, 좁은 화면은 위→아래로 흐르게 놓는다 (col, row 는 0~4)
+  const narrow = dgView.w < 560;
+  const sx = Math.max(0, (dgView.w - 32 - DG.MIN_W - 20) / 4), sy = Math.max(0, (dgView.h - 32 - DG.NODE_H - 12) / 4);
+  const cell = (v) => Math.max(0, Math.min(4, Math.round(Number(v) || 0)));
+  const at = (col, row) => (narrow ? { x: dgSnap(16 + cell(row) * sx), y: dgSnap(16 + cell(col) * sy) } : { x: dgSnap(16 + cell(col) * sx), y: dgSnap(16 + cell(row) * sy) });
+  const ids = new Map(), nodes = [], fresh = new Set(), changes = [], added = [];
+  for (const x of list) {
+    const key = String(x?.id ?? '');
+    if (!key || ids.has(key)) continue;
+    const type = DG_TYPES.some((t) => t.type === x.type) ? x.type : 'custom';
+    const label = String(x.label ?? '').trim().slice(0, 24) || dgType(type).name;
+    const prev = old.get(key);
+    const n = prev ? { ...prev } : { id: 'n' + (++d.seq), ...at(x.col, x.row) };
+    n.type = type; n.label = label; n.dup = !!x.dup;
+    if (type === 'custom') n.kind = DG_KIND[x.kind] ? x.kind : prev?.kind || 'compute'; else delete n.kind;
+    if (!prev) { fresh.add(n.id); changes.push({ op: 'add', label }); added.push(n); }
+    else if (prev.label !== label || prev.type !== type || !!prev.dup !== n.dup) { fresh.add(n.id); changes.push({ op: 'edit', label }); }
+    ids.set(key, n.id); nodes.push(n);
+  }
+  const kept = new Set(ids.values());
+  for (const n of d.nodes) if (!kept.has(n.id)) changes.push({ op: 'del', label: n.label });
+  // 새 카드가 다른 카드와 겹치면 아래 칸, 그다음 오른쪽 칸으로 옮겨 본다
+  const hit = (a, b) => Math.abs(a.x - b.x) < (a.x < b.x ? dgNodeW(a) : dgNodeW(b)) + 14 && Math.abs(a.y - b.y) < DG.NODE_H + 14;
+  for (const n of added) {
+    dgClamp(n);
+    for (let i = 0; i < 40 && nodes.some((o) => o !== n && hit(n, o)); i++) {
+      n.y += DG.NODE_H + 18;
+      if (n.y > dgView.h - DG.NODE_H - 10) { n.y = 16; n.x += DG.MIN_W + 24; }
+      if (n.x > dgView.w - DG.MIN_W - 6) n.x = 16;
+      n.x = dgSnap(n.x); n.y = dgSnap(n.y);
+    }
+    dgClamp(n);
+  }
+  const edges = [];
+  for (const e of Array.isArray(r.edges) ? r.edges : []) {
+    const from = ids.get(String(e?.from)), to = ids.get(String(e?.to));
+    if (!from || !to || from === to || edges.some((o) => o.from === from && o.to === to)) continue;
+    const prev = d.edges.find((o) => o.from === from && o.to === to);
+    edges.push({ id: prev?.id || 'e' + (++d.seq), from, to, async: !!e.async, label: String(e.label ?? '').trim().slice(0, 24) });
+    if (edges.length >= 20) break;
+  }
+  d.nodes = nodes; d.edges = edges;
+  const sel = dgView.sel;
+  if (sel && !(sel.kind === 'node' ? nodes : edges).some((x) => x.id === sel.id)) dgView.sel = null;
+  if (dgView.connectFrom && !kept.has(dgView.connectFrom)) dgView.connectFrom = null;
+  return { fresh, changes };
+}
+// 방금 바뀐 카드를 잠깐 파란 테두리로 보여 준다
+function dgFlash(ids) {
+  clearTimeout(dgView.flashTimer);
+  dgView.fresh = ids?.size ? ids : null;
+  if (!dgView.fresh) return;
+  dgView.flashTimer = setTimeout(() => { dgView.fresh = null; if ($('#dg-svg')) dgRenderSvg(); }, 2600);
 }
 
 function dgAdd(type, at, custom) {
@@ -1823,6 +2107,8 @@ const ENDPOINTS = {
   'like on': ['POST', '좋아요'],
   'like off': ['DELETE', '좋아요 취소'],
   'ai_review ': ['POST', '/api/review · AI 평가'],
+  'ai_interview turn': ['POST', '/api/interview · AI 대화'],
+  'ai_interview finish': ['POST', '/api/interview · 글로 정리'],
   'subscribe ': ['POST', '이메일 구독'],
   'feedback suggest': ['POST', '의견 · 건의'],
   'feedback question': ['POST', '의견 · 문의'],
@@ -2249,6 +2535,7 @@ const TL_SERIES = [
   ['comment_create', '댓글·답글', '#1baf7a'],
   ['like', '좋아요', '#eda100'],
   ['ai_review', 'AI 평가', '#e87ba4'],
+  ['ai_interview', 'AI 대화', '#00a3bf'],
   ['subscribe', '이메일 구독', '#008300'],
   ['sponsor_click', '스폰서 클릭', '#6250d6'],
   ['feedback', '의견 남기기', '#7a5c3d'],
@@ -2453,11 +2740,12 @@ function render() {
   if (state.view === 'archive') main.innerHTML = viewArchive();
   else if (state.view === 'admin') main.innerHTML = viewAdmin();
   else main.innerHTML = viewTopic(state.view === 'today');
-  document.body.classList.toggle('composing', !!$('#composer'));
+  document.body.classList.toggle('composing', !!$('.compose-sheet'));
   document.body.classList.toggle('has-fab', !!$('.fab'));
   renderRail();
   renderFeed();
   if ($('#dg-svg')) dgRender();
+  const chatLog = $('#chat-log'); if (chatLog) chatLog.scrollTop = chatLog.scrollHeight;
   for (const el of main.querySelectorAll('[data-c-input]')) if (el.value.includes('\n') || el.value.length > 40) fitTextarea(el);
   const sheet = $('.compose-sheet');
   if (sheet && sheetTop) sheet.scrollTop = sheetTop;
@@ -2485,10 +2773,10 @@ async function openTopic(id) {
 }
 
 /* ---------- inline confirm (브라우저 confirm 대신) ---------- */
-function confirmed(btn) {
+function confirmed(btn, ask = '한 번 더 눌러 삭제') {
   if (btn.dataset.armed === '1') return true;
   const label = btn.textContent;
-  btn.dataset.armed = '1'; btn.textContent = '한 번 더 눌러 삭제';
+  btn.dataset.armed = '1'; btn.textContent = ask;
   setTimeout(() => { if (btn.isConnected) { btn.dataset.armed = ''; btn.textContent = label; } }, 3000);
   return false;
 }
@@ -2660,8 +2948,23 @@ document.addEventListener('click', async (ev) => {
     return renderChrome();
   }
   if (act === 'logout') { await api.signOut(); state.editingTopic = null; await refreshMe(); await openToday(); return toast('관리자에서 로그아웃했어요'); }
-  if (act === 'reset-demo') { api.reset(); state.composing = false; state.diagram = dgNew(); dgResetHistory(); state.review = null; state.draft = TEMPLATE; state.draftFile = null; state.draftPreview = null; await refreshMe(); return openToday(); }
-  if (act === 'compose') { state.composing = true; render(); $('#post-content')?.focus(); return; }
+  if (act === 'reset-demo') { api.reset(); state.composing = false; state.composeMode = null; state.chat = null; state.diagram = dgNew(); dgResetHistory(); state.review = null; state.draft = TEMPLATE; state.draftFile = null; state.draftPreview = null; await refreshMe(); return openToday(); }
+  if (act === 'compose') { state.composing = true; render(); $('#post-content')?.focus(); $('#chat-input')?.focus(); return; }
+  if (act === 'compose-mode') {
+    state.draft = $('#post-content')?.value ?? state.draft;
+    if (el.dataset.mode === 'write') { state.composeMode = 'write'; render(); $('#post-content')?.focus({ preventScroll: true }); return; }
+    // AI 대화는 서버가 토큰을 확인하므로 닉네임부터 정한다
+    return requireUser(() => {
+      if (!state.chat || state.chat.topicId !== state.topicId) chatStart();
+      state.composeMode = 'chat'; dgView.sel = null; dgView.connectFrom = null;
+      render(); $('#chat-input')?.focus();
+    });
+  }
+  if (act === 'chat-choice') return chatSend(el.dataset.text);
+  if (act === 'chat-retry') return chatTurn();
+  if (act === 'chat-see-canvas') return $('#dg')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (act === 'chat-finish') return chatFinish(el);
+  if (act === 'chat-reset') { if (!confirmed(el, '한 번 더 누르면 대화를 지워요')) return; chatStart(); render(); $('#chat-input')?.focus(); return; }
   if (act === 'ai-review') return runReview();
   if (act === 'feed-open') return openFeedItem(Number(el.dataset.t) || el.dataset.t, Number(el.dataset.p) || el.dataset.p, !!el.dataset.c);
   if (act === 'reply') return openReply(Number(el.dataset.post) || el.dataset.post, Number(el.dataset.root) || el.dataset.root, el.dataset.nick);
@@ -2798,6 +3101,11 @@ document.addEventListener('click', async (ev) => {
 });
 
 document.addEventListener('keydown', (ev) => {
+  // AI 대화 칸: Enter 로 보내고 Shift+Enter 는 줄바꿈 (한글 조합 중에는 무시)
+  if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing && ev.target.id === 'chat-input') {
+    ev.preventDefault();
+    return ev.target.form.requestSubmit();
+  }
   // 댓글 칸: Ctrl/Cmd+Enter 로 등록 (한글 조합 중에는 무시)
   if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey) && !ev.isComposing && ev.target.matches?.('[data-c-input]')) {
     ev.preventDefault();
@@ -2805,12 +3113,13 @@ document.addEventListener('keydown', (ev) => {
   }
   if (ev.key !== 'Escape') return;
   if ($('#layer').innerHTML) closeLayer();
-  else if (state.composing && !state.busy && $('#composer')) { state.composing = false; render(); }
+  else if (state.composing && !state.busy && $('.compose-sheet')) { state.composing = false; render(); }
 });
 
 document.addEventListener('input', (ev) => {
   if (ev.target.id === 'post-content') state.draft = ev.target.value;
   if (ev.target.id === 'post-nick') state.draftNick = ev.target.value;
+  if (ev.target.id === 'chat-input' && state.chat) state.chat.input = ev.target.value;
   if (ev.target.id === 'sub-email') state.subEmail = ev.target.value;
   if (['sp-title', 'sp-body', 'sp-link'].includes(ev.target.id)) renderSponsorPreview();
   if (ev.target.matches?.('[data-c-input]')) {
@@ -2870,13 +3179,17 @@ document.addEventListener('submit', async (ev) => {
       updateFeed();
       if (state.draftPreview?.startsWith('blob:')) URL.revokeObjectURL(state.draftPreview);
       state.draft = TEMPLATE; state.draftFile = null; state.draftPreview = null; state.composing = false;
-      state.diagram = dgNew(); dgResetHistory(); state.dgMode = 'canvas'; state.review = null;
+      state.diagram = dgNew(); dgResetHistory(); state.dgMode = 'canvas'; state.review = null; state.composeMode = null; state.chat = null;
       await refreshPosts(); await refreshTopics();
       state.sort = 'new';
       toast('설계를 올렸어요. 다른 사람들의 답도 둘러보세요');
     } catch (e) { toast(friendlyError(e)); }
     state.busy = false; render();
     return;
+  }
+  if (form.id === 'chat-form') {
+    ev.preventDefault();
+    return chatSend($('#chat-input').value);
   }
   if (form.id === 'topic-form') {
     ev.preventDefault();
