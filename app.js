@@ -18,6 +18,16 @@ const MOVED = !/(\.vercel\.app|^localhost|^127\.0\.0\.1)$/.test(location.hostnam
 
 // 상단 공지: 매일 문제 이메일 구독. 닫거나 구독하면 이 브라우저에서는 다시 띄우지 않는다.
 const NOTICE_KEY = 'harusolgye-notice-subscribe';
+
+// 문제 메일의 링크(?from=mail&d=날짜&l=archive)로 들어온 방문. boot 에서 한 번 기록하고 주소에서는 지운다.
+const MAIL_REF = (() => {
+  const q = new URLSearchParams(location.search);
+  if (q.get('from') !== 'mail') return null;
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(q.get('d') || '') ? q.get('d') : 'unknown';
+  for (const k of ['from', 'd', 'l']) q.delete(k);
+  try { history.replaceState(null, '', location.pathname + (q.toString() ? `?${q}` : '') + location.hash); } catch { /* 주소만 그대로 남는다 */ }
+  return d + (/archive/.test(location.hash) ? ' archive' : '');
+})();
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 // 구독자가 이보다 적으면 숫자를 보여주지 않는다 (적은 숫자는 오히려 망설이게 한다)
 const SUB_COUNT_MIN = 10;
@@ -2536,6 +2546,7 @@ const TL_SERIES = [
   ['like', '좋아요', '#eda100'],
   ['ai_review', 'AI 평가', '#e87ba4'],
   ['ai_interview', 'AI 대화', '#00a3bf'],
+  ['mail_click', '메일 유입', '#c2410c'],
   ['subscribe', '이메일 구독', '#008300'],
   ['sponsor_click', '스폰서 클릭', '#6250d6'],
   ['feedback', '의견 남기기', '#7a5c3d'],
@@ -2552,6 +2563,11 @@ function endpointLabel(type, path) {
   if (type === 'sponsor_click') {
     const s = state.sponsors.find((x) => String(x.id) === String(path));
     return ['CLICK', `스폰서 · ${s ? s.title : `삭제된 광고 #${path}`}`];
+  }
+  // 메일 유입은 path 가 '날짜' 또는 '날짜 archive'
+  if (type === 'mail_click') {
+    const [d, link] = String(path || '').split(' ');
+    return ['MAIL', `메일 유입 · ${/^\d{4}-/.test(d) ? `${fmtDate(d).slice(5)} 메일` : '날짜 모름'}${link === 'archive' ? ' (지난 문제 링크)' : ''}`];
   }
   return ENDPOINTS[`${type} ${path || ''}`] || ['', `${type} ${path || ''}`.trim()];
 }
@@ -3314,6 +3330,7 @@ if (topbar) new ResizeObserver(() => document.documentElement.style.setProperty(
   try {
     api = DEMO ? createDemoApi() : await createSupabaseApi(() => afterAuthChange());
     await refreshMe();
+    if (MAIL_REF) track('mail_click', MAIL_REF);
     refreshSponsors().then(renderRail);
     updateFeed();
     setInterval(() => { if (document.visibilityState === 'visible') updateFeed(); }, FEED_POLL_MS);

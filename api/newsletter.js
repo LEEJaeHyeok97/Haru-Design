@@ -24,6 +24,8 @@ const koDate = (ymd) => new Intl.DateTimeFormat('ko-KR', { timeZone: 'UTC', mont
 
 // 구독 취소 링크 서명. api/unsubscribe.js 와 같은 방식이어야 한다.
 const unsubToken = (email) => crypto.createHmac('sha256', SERVICE_KEY).update(`unsub:${email.toLowerCase()}`).digest('base64url').slice(0, 32);
+// 메일에서 사이트로 들어온 방문을 운영 지표에 남기도록 링크에 표시를 붙인다 (app.js 의 MAIL_REF)
+const mailLink = (topic, link) => `${SITE}/?from=mail&d=${topic.publish_date}${link === 'archive' ? '&l=archive#archive' : ''}`;
 const unsubUrl = (email) => `${SITE}/api/unsubscribe?e=${encodeURIComponent(email)}&t=${unsubToken(email)}`;
 
 async function db(path, { method = 'GET', body, prefer } = {}) {
@@ -119,12 +121,12 @@ function mailHtml(topic, unsubscribe) {
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
               <tr>
                 <td align="center" style="background-color:#3182f6; border-radius:16px;">
-                  <a href="${SITE}/" target="_blank" style="display:block; padding:18px 0; font-size:17px; font-weight:700; color:#ffffff; text-decoration:none; letter-spacing:-0.3px;">설계하러 가기</a>
+                  <a href="${esc(mailLink(topic))}" target="_blank" style="display:block; padding:18px 0; font-size:17px; font-weight:700; color:#ffffff; text-decoration:none; letter-spacing:-0.3px;">설계하러 가기</a>
                 </td>
               </tr>
             </table>
             <p style="margin:16px 0 0 0; text-align:center;">
-              <a href="${SITE}/#archive" target="_blank" style="font-size:14px; font-weight:500; color:#6b7684; text-decoration:none; letter-spacing:-0.3px;">지난 문제 모아보기 ›</a>
+              <a href="${esc(mailLink(topic, 'archive'))}" target="_blank" style="font-size:14px; font-weight:500; color:#6b7684; text-decoration:none; letter-spacing:-0.3px;">지난 문제 모아보기 ›</a>
             </p>
           </td>
         </tr>
@@ -146,7 +148,7 @@ function mailHtml(topic, unsubscribe) {
 }
 
 function mailText(topic, unsubscribe) {
-  return `하루설계 · ${koDate(topic.publish_date)}\n오늘의 설계 문제가 도착했어요\n\n[${topic.title}]\n\n${(topic.description || '').trim()}\n\n설계하러 가기: ${SITE}/\n지난 문제 모아보기: ${SITE}/#archive\n\n구독 취소: ${unsubscribe}\n`;
+  return `하루설계 · ${koDate(topic.publish_date)}\n오늘의 설계 문제가 도착했어요\n\n[${topic.title}]\n\n${(topic.description || '').trim()}\n\n설계하러 가기: ${mailLink(topic)}\n지난 문제 모아보기: ${mailLink(topic, 'archive')}\n\n구독 취소: ${unsubscribe}\n`;
 }
 
 /* ---------- SMTP (Gmail, 465 포트 TLS) ---------- */
