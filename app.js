@@ -499,7 +499,7 @@ function demoReview(p) {
     c('구성 요소 선택', has(/구성 요소|Redis|MySQL|Kafka/i) ? 2 : 0, '데모 점수예요. 규모에 맞는 구성인지 봐요.'),
     c('트레이드오프 판단', has(/포기/) ? 3 : 0, '데모 점수예요. 포기한 것을 적었는지 봐요.'),
     c('병목과 확장성', has(/병목|경합|피크|확장/) ? 2 : 0, '데모 점수예요. 먼저 터질 곳을 봤는지 봐요.'),
-    c('설명의 명확성', p.image_url ? 2 : 1, '데모 점수예요. 글과 그림만으로 이해되는지 봐요.'),
+    c('설명의 명확성', 2, '데모 점수예요. 답안만 보고 설계가 이해되는지 봐요.'),
   ];
   const score = Math.round(criteria.reduce((a, x) => a + x.score, 0) * 2);
   return { score, summary: '데모 모드라 실제 AI 대신 글의 단락과 분량으로 매긴 점수예요.', criteria, strengths: [], improvements: [] };
