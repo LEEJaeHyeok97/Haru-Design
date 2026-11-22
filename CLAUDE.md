@@ -22,7 +22,8 @@
 - `api/newsletter.js`: Vercel Cron(`0 0 * * *` UTC = 오전 9시 KST)이 GET으로 불러 오늘 문제를 구독자에게 Gmail SMTP(`node:tls`로 직접, 의존성 없음)로 보낸다. `newsletter_sends`에 먼저 넣은 요청만 보낸다. POST는 관리자 테스트 발송, `?preview`는 미리 보기. 구독 취소 서명은 `api/unsubscribe.js`와 같은 HMAC(service_role 키). 메일 속 사이트 링크는 `mailLink()`로 `?from=mail&d=날짜`를 붙이고, 프런트 `MAIL_REF`가 boot 때 `track('mail_click', 날짜)` 후 주소에서 지운다.
 - `api/interview.js`: 글쓰기의 'AI와 대화하며 쓰기'. 대화 기록과 지금 캔버스 그림(`{nodes, edges}`, 좌표 없이)을 받아 Claude(effort low)가 다음 질문·답 후보(`choices`)·전체 그림(`col/row` 격자)을 준다. `{ finish: true }`면 대화를 템플릿 글로 정리. 저장 없음, Supabase 토큰 확인. 프런트는 `dgApplyAi()`로 기존 카드 자리는 두고 새 카드만 놓으며(`dgMutate`로 감쌈), 정리한 글은 `state.draft`로 옮겨 직접 쓰기 화면에서 올린다. 서버의 `TYPES`는 `DG_TYPES`와 맞춰 둘 것.
 - `api/review.js`: Supabase 토큰 확인 후 Claude(`claude-opus-5-5`, effort medium, json_schema 구조화 출력, `fallbacks: "default"`)로 평가. 키는 Vercel 환경 변수 `ANTHROPIC_API_KEY`. `{ postId }`로 부르면 올라온 글을 채점해 `posts.ai_score`/`ai_review`에 저장한다 (`api/diagram.js`와 같은 pending 선점 방식, service_role 키 필요). 프런트는 `aiJob()` 큐(`aiDraw`, `aiScore`)로 부른다.
-- 설계 시뮬레이션은 서버 없이 `app.js`에서만 계산한다 (`SIM_SPEC` 가정값 → `simModel` → `simTick` 1초씩). 한 번에 하나(`dgView.sim`)이며 `host`가 `canvas`(글쓰기 캔버스)거나 `post`(올라온 글을 띄운 창, `openSimPost`). 실행은 `track('simulate', host)`.
+- 설계 시뮬레이션은 서버 없이 `app.js`에서만 계산한다 (`SIM_SPEC` 가정값 → `simModel` → `simTick` 1초씩). 한 번에 하나(`dgView.sim`)이며 `host`가 `canvas`(글쓰기 캔버스)거나 `post`(올라온 글을 띄운 창, `openSimPost`). 실행은 `track('simulate', host)`, AI 해설은 `track('simulate', 'explain')`.
+- `api/simulate.js`: 시뮬레이션의 AI 부분. `{ mode: 'scenario', topicId }`는 문제에 맞춘 상황(`base_rps`, `peak`, `fails`)을 문제마다 한 번 만들어 `topics.sim_scenario`에 저장(공개된 문제만, `api/diagram.js`와 같은 pending 선점, 로그인 불필요). `{ mode: 'explain', ... }`는 끝난 결과를 Claude(effort low)가 풀어 줌(저장 없음, Supabase 토큰 확인). `FAILS`는 app.js `SIM_FAILS`와, `TYPES`는 `DG_TYPES`와 맞춰 둘 것.
 
 ## 확인 방법
 

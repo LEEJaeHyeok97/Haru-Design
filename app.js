@@ -264,6 +264,26 @@ async function createSupabaseApi(onAuthChange) {
       if (!r.ok) throw Object.assign(new Error(data.error || 'AI 답을 받지 못했어요. 잠시 뒤 다시 시도해 주세요.'), { status: r.status });
       return data;
     },
+    // 설계 시뮬레이션의 AI 부분 (/api/simulate). 문제에 맞춘 상황은 로그인 없이, 결과 해설은 로그인 후에.
+    // simScenario 돌려주는 값: { status: 'done', scenario } | { status: 'pending' | 'failed' }
+    async simScenario(topicId) {
+      const r = await fetch('/api/simulate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'scenario', topicId }) });
+      const data = await r.json().catch(() => ({}));
+      if (r.status === 202) return data;
+      if (!r.ok) throw Object.assign(new Error(data.error || '문제 상황을 받지 못했어요.'), { status: r.status });
+      return data;
+    },
+    async simExplain(payload) {
+      const token = (await sb.auth.getSession()).data.session?.access_token;
+      const r = await fetch('/api/simulate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token || ''}` },
+        body: JSON.stringify({ mode: 'explain', ...payload }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw Object.assign(new Error(data.error || 'AI 해설을 받지 못했어요. 잠시 뒤 다시 시도해 주세요.'), { status: r.status });
+      return data;
+    },
     // 올라온 글을 AI 가 채점한다 (/api/review 에 postId). 결과는 서버가 저장하므로 로그인이 필요 없다.
     // 돌려주는 값: { status: 'done', score, review } | { status: 'pending' | 'failed' }
     async scorePost(postId) {
@@ -563,6 +583,28 @@ const DEMO_QUESTIONS = [
   ['오래 걸리는 작업은 요청 안에서 처리하나요, 큐로 넘기나요?', ['Kafka로 넘기고 워커가 처리', '요청 안에서 바로 처리해요']],
   ['가장 먼저 병목이 될 곳은 어디라고 보시나요? 그리고 이번 설계에서 일부러 포기한 것도 알려 주세요.', []],
 ];
+// 데모용 시뮬레이션 AI: 문제 제목의 낱말로 상황을 고르고, 결과 숫자로 해설을 만든다 (api/simulate.js 와 같은 모양)
+function demoSimScenario(t) {
+  const text = `${t.title} ${t.description || ''}`;
+  if (/쿠폰|선착순|티켓|예매|이벤트/.test(text)) return { name: '선착순 오픈', desc: '15초에 선착순이 열리며 초당 2천 건이 20배로 몰려요.', base_rps: 2000, peak: 20, fails: [] };
+  if (/좋아요|조회수|카운트|랭킹/.test(text)) return { name: '좋아요 폭주', desc: '인기 글에 초당 5천 건이 8배로 몰리는 동안 캐시가 멈춰요.', base_rps: 5000, peak: 8, fails: ['cache'] };
+  if (/결제|주문|송금/.test(text)) return { name: '결제사 지연', desc: '초당 1천 건이 들어오는 중에 외부 결제 API가 느려져요.', base_rps: 1000, peak: 2, fails: ['external'] };
+  return { name: '피크 시간', desc: '초당 1천 건이 5배로 늘고 주 DB 한 대가 멈춰요.', base_rps: 1000, peak: 5, fails: ['db'] };
+}
+function demoSimExplain({ diagram, result }) {
+  const name = (id) => diagram.nodes.find((n) => n.id === id)?.label || id;
+  const worst = [...result.nodes].sort((a, b) => b.fails - a.fails || b.peakUtil - a.peakUtil)[0];
+  const spof = result.nodes.filter((n) => n.spof).map((n) => name(n.id));
+  const ok = result.success >= 0.999;
+  const points = [];
+  if (worst && (worst.fails >= 1 || worst.peakUtil >= 100)) points.push({ title: `${name(worst.id)}가 먼저 버티지 못했어요`, body: `사용률이 최대 ${Math.round(worst.peakUtil)}%까지 올라 대기열이 2초를 넘긴 요청부터 실패했어요. 한 대를 더 두거나 앞에 캐시를 두면 실패 수가 줄어요.` });
+  if (spof.length) points.push({ title: '한 대뿐인 곳', body: `${spof.slice(0, 3).join(', ')}는 멈추면 그 길의 요청이 모두 실패해요. ×2로 두면 비용은 늘지만 한 대가 멈춰도 버텨요.` });
+  return {
+    summary: ok ? `이 상황에서는 성공률 ${(result.success * 100).toFixed(1)}%로 잘 버텼어요. 트래픽을 더 올렸을 때 어디가 먼저 막히는지도 돌려 보세요.`
+      : `성공률이 ${(result.success * 100).toFixed(1)}%까지 떨어졌고, 가장 나빴던 건 ${result.worstT}초였어요. 데모 모드라 실제 AI 대신 결과 숫자로 만든 해설이에요.`,
+    points,
+  };
+}
 function demoInterview({ messages, diagram: cur, finish }) {
   const mine = messages.filter((m) => m.role === 'me').map((m) => m.text);
   const all = mine.join('\n');
@@ -713,6 +755,16 @@ function createDemoApi() {
     async interview(payload) {
       await new Promise((r) => setTimeout(r, 600));
       return demoInterview(payload);
+    },
+    async simScenario(topicId) {
+      await new Promise((r) => setTimeout(r, 800));
+      const t = db.topics.find((x) => x.id === topicId);
+      return t ? { status: 'done', scenario: demoSimScenario(t) } : { status: 'failed' };
+    },
+    async simExplain(payload) {
+      need();
+      await new Promise((r) => setTimeout(r, 1200));
+      return demoSimExplain(payload);
     },
     // 데모에서는 Claude 대신 글 길이와 단락으로 그럴듯한 점수를 만든다
     async scorePost(postId) {
@@ -2045,6 +2097,7 @@ document.addEventListener('click', (ev) => {
     case 'sim-run': return dgSimStart();
     case 'sim-scenario': dgView.simScenario = b.dataset.id; return dgSimStart();
     case 'sim-rate': dgView.simRate = Number(b.dataset.rate); return dgSimStart();
+    case 'sim-explain': return simExplain();
     case 'sim-tune-close': if (dgView.sim) { dgView.sim.tune = null; simRenderTune(); simPaint(dgView.sim); } return;
     case 'sim-tune-reset': {
       const v = dgView.sim, n = v?.tune && simD(v).nodes.find((x) => x.id === v.tune);
@@ -2121,13 +2174,24 @@ const SIM_KIND_SPEC = { edge: 'lb', compute: 'api', memory: 'redis', store: 'sql
 const SIM = { T: 60, FROM: 15, TO: 45, TICK_MS: 100, MAX_WAIT: 2, THREAD_BUDGET: 0.25 };
 const SIM_RATES = [100, 1000, 10000, 100000];
 const simIsDb = (x) => ['mysql', 'sql', 'replica', 'nosql'].includes(x.n.type) || (x.n.type === 'custom' && x.kind === 'store');
+// 문제 구간 동안 멈추거나 느려지는 부품 (api/simulate.js 의 FAILS 와 같은 목록)
+const SIM_FAILS = {
+  cache: (m) => m.topo.filter((x) => x.kind === 'memory'),
+  db: (m) => m.topo.filter((x) => simIsDb(x) && x.n.type !== 'replica').slice(0, 1),
+  external: (m) => m.topo.filter((x) => x.kind === 'external' && x.n.type !== 'monitor'),
+  queue: (m) => m.topo.filter((x) => x.kind === 'queue'),
+};
+// peak: 문제 구간에 트래픽이 몇 배가 되나, fails: 멈추는 부품
 const SIM_SCENARIOS = [
   { id: 'normal', name: '평소', desc: '평소 트래픽이 꾸준히 들어와요.' },
-  { id: 'spike', name: '트래픽 10배', desc: '15초부터 요청이 10배로 늘었다가 45초에 돌아와요.' },
-  { id: 'cache', name: '캐시 다운', desc: '15~45초 동안 캐시가 멈춰서 요청이 전부 DB로 가요.', target: (m) => m.topo.filter((x) => x.kind === 'memory'), none: '그림에 캐시가 없어요' },
-  { id: 'db', name: 'DB 장애', desc: '15~45초 동안 주 DB 한 대가 멈춰요. ×2면 남은 한 대가 받아요.', target: (m) => m.topo.filter((x) => simIsDb(x) && x.n.type !== 'replica').slice(0, 1), none: '그림에 DB가 없어요' },
-  { id: 'ext', name: '외부 API 장애', desc: '15~45초 동안 외부 API가 2.5초씩 걸리고 30%가 실패해요.', target: (m) => m.topo.filter((x) => x.kind === 'external' && x.n.type !== 'monitor'), none: '그림에 외부 API가 없어요' },
+  { id: 'spike', name: '트래픽 10배', desc: '15초부터 요청이 10배로 늘었다가 45초에 돌아와요.', peak: 10 },
+  { id: 'cache', name: '캐시 다운', desc: '15~45초 동안 캐시가 멈춰서 요청이 전부 DB로 가요.', fails: ['cache'], none: '그림에 캐시가 없어요' },
+  { id: 'db', name: 'DB 장애', desc: '15~45초 동안 주 DB 한 대가 멈춰요. ×2면 남은 한 대가 받아요.', fails: ['db'], none: '그림에 DB가 없어요' },
+  { id: 'ext', name: '외부 API 장애', desc: '15~45초 동안 외부 API가 2.5초씩 걸리고 30%가 실패해요.', fails: ['external'], none: '그림에 외부 API가 없어요' },
 ];
+const simTargets = (sc, m) => (sc.fails || []).flatMap((f) => (SIM_FAILS[f] ? SIM_FAILS[f](m) : []));
+// 고정 상황은 멈출 부품이 그림에 없으면 고를 수 없다. 문제에 맞춘 AI 상황은 트래픽만으로도 돌린다
+const simUsable = (sc, m) => sc.ai || !sc.fails || simTargets(sc, m).length > 0;
 
 function simModel(d) {
   const nodes = d.nodes.map((n) => {
@@ -2175,9 +2239,10 @@ function simWeights(x, down) {
 }
 
 function simTick(m, sc, base, t) {
-  const mult = sc.id === 'spike' ? (t < SIM.FROM ? 1 : t < SIM.FROM + 5 ? 1 + 9 * (t - SIM.FROM) / 5 : t < SIM.TO ? 10 : 1) : 1;
+  const peak = sc.peak || 1;
+  const mult = t < SIM.FROM ? 1 : t < SIM.FROM + 5 ? 1 + (peak - 1) * (t - SIM.FROM) / 5 : t < SIM.TO ? peak : 1;
   const on = t >= SIM.FROM && t < SIM.TO;
-  const down = new Set(on && sc.target ? sc.target(m).map((x) => x.id) : []);
+  const down = new Set(on ? simTargets(sc, m).map((x) => x.id) : []);
   const rate = base * mult, edges = new Map(), nodes = new Map();
   for (const x of m.nodes) { x.s = 0; x.a = 0; }
   for (const x of m.sources) x.s += rate / m.sources.length;
@@ -2219,7 +2284,8 @@ function simTick(m, sc, base, t) {
       const w = Math.min(1, x.w[i]), c = o.to;
       D += w * (c.mean + c.D); P += w * (c.p99 + c.P); S *= 1 - w * (1 - c.S);
     });
-    x.D = D; x.P = P; x.S = S;
+    // 아래 응답 시간은 다음 초의 처리 여력에 쓰인다. 바로 반영하면 매초 오르내리므로 조금씩 따라가게 한다
+    x.D = x.D ? x.D * 0.6 + D * 0.4 : D; x.P = P; x.S = S;
   }
   const avg = (f) => m.sources.reduce((s, x) => s + f(x), 0) / m.sources.length;
   return { t, rate, success: avg((x) => x.S), p99: avg((x) => x.p99 + x.P), nodes, edges, down };
@@ -2267,11 +2333,14 @@ function simFlowPath(g, e, sim) {
 
 function simBarHtml() {
   const v = dgView.sim, m = v.model;
-  return `<div class="seg" role="group" aria-label="문제 상황">${SIM_SCENARIOS.map((sc) => {
-    const off = sc.target && !sc.target(m).length;
+  const topic = simTopicState(v.topicId);
+  const aiBtn = topic === 'loading' ? '<button type="button" class="sim-ai-sc" disabled><span class="spinner" aria-hidden="true"></span>문제 상황 만드는 중</button>'
+    : topic ? `<button type="button" class="sim-ai-sc" data-dg-act="sim-scenario" data-id="topic" aria-pressed="${v.scenario.id === 'topic'}" title="${esc(topic.desc)}"><span class="chip ai">AI</span>${esc(topic.name)}</button>` : '';
+  return `<div class="seg" role="group" aria-label="문제 상황">${aiBtn}${SIM_SCENARIOS.map((sc) => {
+    const off = !simUsable(sc, m);
     return `<button type="button" data-dg-act="sim-scenario" data-id="${sc.id}" aria-pressed="${v.scenario.id === sc.id}" ${off ? `disabled title="${sc.none}"` : ''}>${sc.name}</button>`;
   }).join('')}</div>
-    <div class="seg" role="group" aria-label="평소 트래픽">${SIM_RATES.map((r) => `<button type="button" data-dg-act="sim-rate" data-rate="${r}" aria-pressed="${v.rate === r}">${simFmtRate(r)}/초</button>`).join('')}</div>
+    ${v.scenario.ai ? `<span class="sim-ai-rate">평소 ${simFmtRate(v.rate)}/초${v.scenario.peak > 1 ? ` → ${v.scenario.peak}배` : ''}</span>` : `<div class="seg" role="group" aria-label="평소 트래픽">${SIM_RATES.map((r) => `<button type="button" data-dg-act="sim-rate" data-rate="${r}" aria-pressed="${v.rate === r}">${simFmtRate(r)}/초</button>`).join('')}</div>`}
     <span class="dg-tip"></span>
     <button class="btn small" type="button" data-dg-act="sim-run">${v.timer ? '처음부터' : '다시 실행'}</button>
     ${v.host === 'canvas' ? '<button class="btn small ghost" type="button" data-dg-act="sim-close">편집으로 돌아가기</button>' : ''}`;
@@ -2403,9 +2472,68 @@ function simSummary(v) {
   }
   html += `<div class="dg-sim-lists">${list('느린 곳', slow)}${list('실패한 곳', failing)}${list('밀린 작업', backlog)}${list('단일 장애 지점', spofs)}${list('이렇게 고쳐 볼 수 있어요', tips)}</div>`;
   if (!failing.length && !backlog.length && success >= 0.999) html += `<p class="dg-sim-ok">이 상황에서는 문제없이 버텼어요. 트래픽을 올리거나 다른 상황도 돌려 보세요.</p>`;
-  return html;
+  return html + simExplainHtml(v);
 }
 const simFmtPct2 = (v) => `${(Math.floor(v * 1000) / 10).toFixed(1).replace(/\.0$/, '')}%`;
+
+/* ---------- AI: 문제에 맞춘 상황 + 결과 해설 (api/simulate.js) ---------- */
+// 문제마다 한 번 받아 둔다. undefined: 아직 안 물어봄, 'loading', null: 없음, 객체: 상황
+const simTopicCache = new Map();
+const simTopicState = (id) => simTopicCache.get(id);
+async function simLoadTopic(id, tries = 0) {
+  if (id == null || (simTopicCache.has(id) && simTopicCache.get(id) !== 'loading') || (simTopicCache.get(id) === 'loading' && !tries)) return;
+  simTopicCache.set(id, 'loading');
+  let next = null;
+  try {
+    const r = await api.simScenario(id);
+    if (r.status === 'pending' && tries < 6) { setTimeout(() => simLoadTopic(id, tries + 1), 3000); return; }
+    const s = r.scenario;
+    if (r.status === 'done' && s) {
+      next = { id: 'topic', ai: true, name: s.name, desc: s.desc, base: s.base_rps, peak: s.peak, fails: s.fails, none: '' };
+    }
+  } catch { /* 없으면 버튼만 안 보인다 */ }
+  simTopicCache.set(id, next);
+  const v = dgView.sim;
+  if (v && v.topicId === id) { const bar = $(simHost(v).bar); if (bar) bar.innerHTML = simBarHtml(); }
+}
+
+function simExplainHtml(v) {
+  const x = v.explain;
+  if (!x) return '<div class="dg-sim-ai"><button class="btn small" type="button" data-dg-act="sim-explain"><span class="chip ai">AI</span>이 결과 해설 듣기</button></div>';
+  if (x === 'loading') return '<div class="dg-sim-ai" role="status"><span class="spinner" aria-hidden="true"></span>AI가 결과를 읽고 있어요</div>';
+  if (x.error) return `<div class="dg-sim-ai"><p class="err">${esc(x.error)}</p><button class="btn small" type="button" data-dg-act="sim-explain">다시 시도</button></div>`;
+  return `<div class="dg-sim-ai done"><h4><span class="chip ai">AI</span>해설</h4><p>${esc(x.summary)}</p>
+    ${x.points.length ? `<ul>${x.points.map((p) => `<li><b>${esc(p.title)}</b><span>${esc(p.body)}</span></li>`).join('')}</ul>` : ''}
+    <p class="ai-fig-note">가정값으로 계산한 결과를 AI가 풀어 쓴 참고용 해설이에요.</p></div>`;
+}
+async function simExplain() {
+  const v = dgView.sim;
+  if (!v || v.timer || v.explain === 'loading') return;
+  const topic = state.topics.find((t) => t.id === v.topicId);
+  const d = simD(v), spofs = new Set(simSpofs(v.model).map((x) => x.id));
+  const acc = v.acc, run = v.acc;
+  const payload = {
+    topic: { title: topic?.title || '', description: topic?.description || '' },
+    diagram: dgSaveShape(d),
+    scenario: { name: v.scenario.name, desc: v.scenario.desc, rate: v.rate },
+    result: {
+      success: acc.total ? 1 - acc.failed / acc.total : 1, maxP99: acc.maxP99, failed: acc.failed, worstT: (v.worst?.t ?? 0) + 1,
+      nodes: [...acc.nodes.values()].filter((a) => !a.client).map((a) => ({
+        id: a.x.id, cap: Number.isFinite(a.x.spec.cap) ? a.x.spec.cap * a.x.inst : 1e8, lat: a.x.spec.lat,
+        peakUtil: Number.isFinite(a.peakUtil) ? a.peakUtil * 100 : 0, peakP99: a.peakP99, fails: a.fails, maxBacklog: a.maxBacklog, deadTicks: a.deadTicks, spof: spofs.has(a.x.id),
+      })),
+    },
+  };
+  v.explain = 'loading'; dgSimRenderPanel();
+  track('simulate', 'explain');
+  try {
+    const r = await api.simExplain(payload);
+    if (dgView.sim === v && v.acc === run) v.explain = { summary: r.summary || '', points: r.points || [] };
+  } catch (e) {
+    if (dgView.sim === v && v.acc === run) v.explain = { error: e.status === 401 ? '닉네임을 정한 뒤에 쓸 수 있어요. 글을 올리거나 댓글을 달면 닉네임이 생겨요.' : friendlyError(e) };
+  }
+  if (dgView.sim === v) dgSimRenderPanel();
+}
 
 /* ---------- 실행 ----------
    시뮬레이션은 한 번에 하나(dgView.sim). host 'canvas' 는 글쓰기 캔버스, 'post' 는 올라온 글을 띄운 창이다. */
@@ -2443,7 +2571,8 @@ function dgSimOpen() {
   if (dgView.sim) dgSimClose();
   if (!simModel(state.diagram).sources.length) return;
   dgView.sel = null; dgView.connectFrom = null; dgView.customOpen = false;
-  dgView.sim = { host: 'canvas', scenario: SIM_SCENARIOS[0], rate: dgView.simRate || 1000, tune: null };
+  dgView.sim = { host: 'canvas', topicId: state.topicId, scenario: SIM_SCENARIOS[0], rate: dgView.simRate || 1000, tune: null };
+  simLoadTopic(state.topicId);
   dgSimStart();
 }
 function dgSimStart({ silent = false } = {}) {
@@ -2451,11 +2580,12 @@ function dgSimStart({ silent = false } = {}) {
   if (!v) return;
   clearInterval(v.timer);
   v.model = simModel(simD(v));
-  const sc = SIM_SCENARIOS.find((x) => x.id === dgView.simScenario) || SIM_SCENARIOS[0];
-  v.scenario = sc.target && !sc.target(v.model).length ? SIM_SCENARIOS[0] : sc;
-  v.rate = dgView.simRate || v.rate;
+  const topic = simTopicState(v.topicId);
+  const sc = dgView.simScenario === 'topic' && topic && topic !== 'loading' ? topic : SIM_SCENARIOS.find((x) => x.id === dgView.simScenario) || SIM_SCENARIOS[0];
+  v.scenario = simUsable(sc, v.model) ? sc : SIM_SCENARIOS[0];
+  v.rate = v.scenario.base || dgView.simRate || 1000;
   v.acc = { total: 0, failed: 0, maxP99: 0, nodes: new Map() };
-  v.last = null; v.worst = null; v.t = 0; v.series = []; v.hoverT = null;
+  v.last = null; v.worst = null; v.t = 0; v.series = []; v.hoverT = null; v.explain = null;
   v.timer = setInterval(dgSimStep, SIM.TICK_MS);
   if (!silent) track('simulate', v.host);
   dgSimStep();
@@ -2520,7 +2650,8 @@ function openSimPost(p) {
       <div class="dg-bar" id="sim-bar"></div>
       <div class="dg-sim" id="sim-panel"></div>
     </div></div>`;
-  dgView.sim = { host: 'post', d, postId: p.id, scenario: SIM_SCENARIOS[0], rate: dgView.simRate || 1000, tune: null };
+  dgView.sim = { host: 'post', d, postId: p.id, topicId: p.topic_id, scenario: SIM_SCENARIOS[0], rate: dgView.simRate || 1000, tune: null };
+  simLoadTopic(p.topic_id);
   dgSimStart();
 }
 
@@ -2840,6 +2971,7 @@ const ENDPOINTS = {
   'feedback improve': ['POST', '의견 · 개선'],
   'simulate canvas': ['GET', '시뮬레이션 · 내 설계'],
   'simulate post': ['GET', '시뮬레이션 · 올라온 설계'],
+  'simulate explain': ['POST', '/api/simulate · AI 해설'],
 };
 const fmtNum = (n) => Number(n || 0).toLocaleString('ko-KR');
 const fmtSec = (ms) => (ms == null ? '-' : `${(ms / 1000).toFixed(1)}초`);

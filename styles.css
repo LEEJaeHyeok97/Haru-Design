@@ -823,3 +823,16 @@ a.sponsor:hover { box-shadow: var(--shadow-lg); transform: translateY(-1px); }
 #sim-svg .dg-node { cursor: pointer; }
 #sim-svg .dg-flow { stroke-dasharray: 0 16; stroke-linecap: round; pointer-events: none; opacity: .85; animation: dg-flow .8s linear infinite; }
 @media (prefers-reduced-motion: reduce) { #sim-svg .dg-flow { animation: none; stroke-dasharray: none; opacity: .35; } }
+.seg .sim-ai-sc { display: inline-flex; align-items: center; gap: 4px; }
+.seg .sim-ai-sc .spinner { width: 12px; height: 12px; }
+.sim-ai-rate { font-size: var(--text-xs); color: var(--muted); font-weight: 600; }
+.dg-sim-ai { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: var(--text-sm); color: var(--muted); }
+.dg-sim-ai .spinner { width: 14px; height: 14px; }
+.dg-sim-ai .err { margin: 0; color: var(--like); font-size: var(--text-xs); }
+.dg-sim-ai.done { display: grid; gap: 8px; background: var(--surface); border-radius: 12px; padding: 14px 16px; box-shadow: var(--shadow); color: var(--ink-2); }
+.dg-sim-ai.done h4 { margin: 0; display: flex; align-items: center; gap: 6px; font-size: var(--text-xs); color: var(--muted); font-weight: 600; }
+.dg-sim-ai.done > p { margin: 0; line-height: 1.6; }
+.dg-sim-ai.done ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.dg-sim-ai.done li { display: grid; gap: 2px; }
+.dg-sim-ai.done li span { font-size: var(--text-xs); color: var(--muted); line-height: 1.6; }
+.dg-sim-ai.done .ai-fig-note { margin: 0; }
