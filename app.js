@@ -784,7 +784,7 @@ function createDemoApi() {
       await new Promise((r) => setTimeout(r, 1500));
       const p = db.posts.find((x) => x.id === postId);
       if (!p) throw new Error('글을 찾지 못했어요.');
-      if (p.image_url) return { status: 'skip' };
+      // 데모에서는 이미지를 읽지 않고 글로만 그린다
       if (!p.ai_diagram) {
         p.ai_diagram = demoDiagram(p.content);
         p.ai_diagram_status = p.ai_diagram ? 'done' : 'failed';
@@ -975,7 +975,8 @@ function aiJob({ needs, status, call, apply, fail }) {
 
 // 다이어그램 없이 글만 있는 답안은 AI 에게 그림을 부탁한다
 const aiDraw = aiJob({
-  needs: (p) => !p.image_url && !p.ai_diagram && p.ai_diagram_status !== 'failed' && !!meaningful(p.content || ''),
+  // 그림 없는 글은 붙여 보여 줄 그림을, 이미지로 올린 글(캔버스 데이터 없음)은 시뮬레이션에 쓸 그림을 만든다
+  needs: (p) => !p.diagram && !p.ai_diagram && p.ai_diagram_status !== 'failed' && (!!p.image_url || !!meaningful(p.content || '')),
   status: (p) => p.ai_diagram_status,
   call: (id) => api.drawDiagram(id),
   apply: (p, r) => { p.ai_diagram = r.diagram; p.ai_diagram_status = 'done'; },
@@ -2625,7 +2626,7 @@ function dgSimClose() {
 }
 
 /* ---------- 올라온 글의 설계 돌려 보기 ---------- */
-// 캔버스로 그려 올린 글은 그림 데이터(posts.diagram), 글만 올린 글은 AI 가 그린 그림(ai_diagram)을 쓴다
+// 캔버스로 그려 올린 글은 그림 데이터(posts.diagram), 그 밖의 글(글만, 또는 이미지로 올린 글)은 AI 가 옮긴 그림(ai_diagram)을 쓴다
 function simDiagramOf(p) {
   for (const [raw, ai] of [[p.diagram, false], [p.ai_diagram, true]]) {
     const d = raw && dgNormalize(raw);
@@ -2645,7 +2646,7 @@ function openSimPost(p) {
   $('#layer').innerHTML = `<div class="overlay" data-act="close-layer">
     <div class="modal sim-modal" role="dialog" aria-modal="true" aria-labelledby="sim-title">
       <div class="sim-modal-head"><h2 id="sim-title">${esc(p.author.nickname)}님 설계 시뮬레이션</h2><button class="btn ghost small" type="button" data-act="close-layer" aria-label="닫기">닫기</button></div>
-      ${ai ? '<p class="ai-fig-note"><span class="chip ai">AI</span>글을 읽고 AI가 그린 그림으로 돌려요. 실제 설계와 다를 수 있어요.</p>' : ''}
+      ${ai ? `<p class="ai-fig-note"><span class="chip ai">AI</span>${p.image_url ? '올린 그림과 글을 AI가 읽어 옮긴 그림으로 돌려요. 원래 그림과 조금 다를 수 있어요.' : '글을 읽고 AI가 그린 그림으로 돌려요. 실제 설계와 다를 수 있어요.'}</p>` : ''}
       <div class="sim-stage"><svg id="sim-svg" viewBox="${x0 - pad - pw / 2} ${y0 - pad} ${w + pw} ${h}" role="img" aria-label="시뮬레이션 중인 설계 다이어그램" xmlns="http://www.w3.org/2000/svg" font-family='${DG_FONT}'>${dgDefs()}<g id="sim-layer"></g></svg></div>
       <div class="dg-bar" id="sim-bar"></div>
       <div class="dg-sim" id="sim-panel"></div>
@@ -2844,8 +2845,9 @@ function commentsHtml(p) {
 // 그림 자리: 직접 올린 그림 > AI 가 그린 그림 > 그리는 중 표시
 function postFigHtml(p) {
   // 그림 데이터가 있으면 이 설계를 바로 돌려 볼 수 있다
-  const sim = simDiagramOf(p) ? `<button class="btn small sim-open" type="button" data-act="sim-post" data-id="${p.id}">▶ 이 설계 시뮬레이션</button>` : '';
-  if (p.image_url) return `<div class="post-fig"><button class="post-img" type="button" data-act="zoom" data-src="${esc(p.image_url)}" aria-label="다이어그램 크게 보기"><img src="${esc(p.image_url)}" alt="${esc(p.author.nickname)}님의 설계 다이어그램" loading="lazy"></button>${p.diagram ? sim : ''}</div>`;
+  const sim = simDiagramOf(p) ? `<button class="btn small sim-open" type="button" data-act="sim-post" data-id="${p.id}">▶ 이 설계 시뮬레이션</button>`
+    : isDrawing(p) ? '<button class="btn small sim-open" type="button" disabled><span class="spinner" aria-hidden="true"></span>시뮬레이션 준비 중</button>' : '';
+  if (p.image_url) return `<div class="post-fig"><button class="post-img" type="button" data-act="zoom" data-src="${esc(p.image_url)}" aria-label="다이어그램 크게 보기"><img src="${esc(p.image_url)}" alt="${esc(p.author.nickname)}님의 설계 다이어그램" loading="lazy"></button>${sim}</div>`;
   const ai = p.ai_diagram && aiDiagramUrl(p.ai_diagram);
   if (ai) {
     return `<div class="post-fig"><button class="post-img" type="button" data-act="zoom" data-src="${esc(ai)}" aria-label="AI가 그린 다이어그램 크게 보기"><img src="${esc(ai)}" alt="AI가 글을 보고 그린 설계 다이어그램"></button>

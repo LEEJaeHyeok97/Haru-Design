@@ -836,3 +836,6 @@ a.sponsor:hover { box-shadow: var(--shadow-lg); transform: translateY(-1px); }
 .dg-sim-ai.done li { display: grid; gap: 2px; }
 .dg-sim-ai.done li span { font-size: var(--text-xs); color: var(--muted); line-height: 1.6; }
 .dg-sim-ai.done .ai-fig-note { margin: 0; }
+.btn.sim-open { background: var(--marker-soft); color: var(--marker); font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+.btn.sim-open:hover:not([disabled]) { background: #d6e8ff; }
+.btn.sim-open .spinner { width: 12px; height: 12px; }
