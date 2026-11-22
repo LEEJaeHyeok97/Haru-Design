@@ -31,6 +31,8 @@ const MAIL_REF = (() => {
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 // 구독자가 이보다 적으면 숫자를 보여주지 않는다 (적은 숫자는 오히려 망설이게 한다)
 const SUB_COUNT_MIN = 10;
+// 구독 카드의 "OO에 다니는 분들도" 줄에서 회사 이름을 바꾸는 간격
+const SUB_CO_MS = 2800;
 let noticeClosed = false;
 try { noticeClosed = localStorage.getItem(NOTICE_KEY) === '1'; } catch { /* 저장소를 못 쓰면 매번 보여준다 */ }
 // 문제 즐겨찾기: 로그인 없이 이 브라우저에만 남긴다. 최근에 누른 것이 앞.
@@ -286,6 +288,14 @@ async function createSupabaseApi(onAuthChange) {
       const { data, error } = await sb.rpc('subscriber_count');
       return error ? null : data;
     },
+    // 구독 카드에 돌아가며 보일 회사 이름 (supabase/2026-11-22-sub-companies.sql). 읽기는 누구나, 넣고 빼기는 관리자만.
+    async listSubCompanies() { return must(await sb.from('sub_companies').select('*').order('created_at')); },
+    async addSubCompany(name) {
+      const { error } = await sb.from('sub_companies').insert({ name });
+      if (error?.code === '23505') throw new Error('이미 넣은 회사예요.');
+      if (error) throw error;
+    },
+    async deleteSubCompany(id) { must(await sb.from('sub_companies').delete().eq('id', id)); },
     async listSubscribers() { return must(await sb.from('subscribers').select('*').order('created_at', { ascending: false })); },
     async deleteSubscriber(id) { must(await sb.from('subscribers').delete().eq('id', id)); },
     // 개발자 혼내러가기 (supabase/2026-10-29-feedback.sql). 남기기는 누구나, 보기·삭제는 관리자만.
@@ -751,6 +761,17 @@ function createDemoApi() {
       return { already: false };
     },
     async subscriberCount() { return 128 + (db.subscribers || []).length; },
+    async listSubCompanies() {
+      db.subCompanies = db.subCompanies || ['카카오', '토스', '우아한형제들'].map((name) => ({ id: nextId(), name, created_at: new Date().toISOString() }));
+      return [...db.subCompanies];
+    },
+    async addSubCompany(name) {
+      needAdmin(); await wait();
+      db.subCompanies = db.subCompanies || [];
+      if (db.subCompanies.some((c) => c.name === name)) throw new Error('이미 넣은 회사예요.');
+      db.subCompanies.push({ id: nextId(), name, created_at: new Date().toISOString() }); save();
+    },
+    async deleteSubCompany(id) { needAdmin(); db.subCompanies = (db.subCompanies || []).filter((c) => c.id !== id); save(); },
     async listSubscribers() { needAdmin(); await wait(); return [...(db.subscribers || [])].sort((a, b) => b.created_at.localeCompare(a.created_at)); },
     async deleteSubscriber(id) { needAdmin(); db.subscribers = (db.subscribers || []).filter((s) => s.id !== id); save(); },
     async sendFeedback(row) { await wait(); db.feedback = (db.feedback || []).concat({ ...row, id: nextId(), created_at: new Date().toISOString() }); save(); },
@@ -801,6 +822,8 @@ const state = {
   subEmail: '',           // 상단 공지에 쓰던 이메일
   subDone: false,         // 방금 구독함 (이번 방문 동안 고마움 표시)
   subCount: null,         // 구독자 수 (상단 공지에 표시)
+  subCompanies: [],       // 구독 카드에 돌아가며 보일 회사 [{ id, name }]
+  subCoIdx: 0,            // 지금 보이는 회사 순서
   subscribers: null,      // 관리자: { list, loading, error }
   feedback: null,         // 관리자: 받은 의견 { list, loading, error }
   sponsors: [],           // 켜진 스폰서 (관리자는 전부), sort_order 순
@@ -839,7 +862,7 @@ function go(view, topicId = null) {
   window.scrollTo({ top: 0 });
   render();
   track('view', '/' + view);
-  if (view === 'admin' && state.me?.isAdmin) { loadMetrics(); loadTimeline(); loadSubscribers(); loadFeedback(); refreshSponsors().then(() => { const w = $('.sponsor-rows-wrap'); if (w) w.outerHTML = sponsorRowsHtml(); }); }
+  if (view === 'admin' && state.me?.isAdmin) { loadMetrics(); loadTimeline(); loadSubscribers(); loadSubCompanies().then(renderSubscribers); loadFeedback(); refreshSponsors().then(() => { const w = $('.sponsor-rows-wrap'); if (w) w.outerHTML = sponsorRowsHtml(); }); }
 }
 
 async function refreshMe() { state.me = await api.me(); }
@@ -942,7 +965,7 @@ function renderChrome() {
     : noticeClosed || state.me?.isAdmin ? ''
     : `<div class="notice subscribe" role="region" aria-label="이메일 구독"><span class="chip">NEW</span><div class="notice-body"><strong>매일 올라오는 설계 문제를 이메일로 받고 싶다면 이메일을 남겨주세요!</strong>
         <form class="sub-form" id="sub-form"><input type="email" id="sub-email" required maxlength="254" placeholder="name@example.com" autocomplete="email" aria-label="이메일" value="${esc(state.subEmail)}"><button class="btn small primary" type="submit">받아보기</button></form>
-        <span class="sub-note">${state.subCount >= SUB_COUNT_MIN ? `지금 <b>${fmtNum(state.subCount)}명</b>이 매일 아침 이메일로 설계 문제를 받고 있어요 · ` : ''}문제 발송에만 써요.</span></div><button class="btn ghost small" type="button" data-act="dismiss-notice" aria-label="공지 닫기">✕</button></div>`;
+        <span class="sub-note">${state.subCount >= SUB_COUNT_MIN ? `지금 <b>${fmtNum(state.subCount)}명</b>이 매일 아침 이메일로 설계 문제를 받고 있어요 · ` : ''}문제 발송에만 써요.</span>${subCompaniesHtml()}</div><button class="btn ghost small" type="button" data-act="dismiss-notice" aria-label="공지 닫기">✕</button></div>`;
   // 이메일을 쓰는 중에 화면이 다시 그려져도 입력 위치를 지킨다
   const typingEmail = document.activeElement?.id === 'sub-email';
   $('#banner').innerHTML = moved + notice + (DEMO
@@ -950,6 +973,32 @@ function renderChrome() {
     : '');
   if (typingEmail) $('#sub-email')?.focus();
 }
+
+function subCompaniesHtml() {
+  const list = state.subCompanies;
+  if (!list.length) return '';
+  const name = list[state.subCoIdx % list.length].name;
+  return `<span class="sub-companies"><b class="sub-co">${esc(name)}</b>에 다니는 분들도 받아보고 있어요</span>`;
+}
+// 인프런처럼 회사 이름만 돌아가며 바꾼다. 입력 중인 이메일을 건드리지 않게 글자만 고친다.
+async function loadSubCompanies() {
+  try { state.subCompanies = shuffle(await api.listSubCompanies()); } catch { state.subCompanies = []; }
+  state.subCoIdx = 0;
+  renderChrome();
+}
+function shuffle(a) {
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+setInterval(() => {
+  const el = $('.sub-co');
+  if (!el || state.subCompanies.length < 2 || document.visibilityState !== 'visible') return;
+  state.subCoIdx = (state.subCoIdx + 1) % state.subCompanies.length;
+  el.classList.remove('swap');
+  void el.offsetWidth; // 애니메이션을 다시 시작
+  el.textContent = state.subCompanies[state.subCoIdx].name;
+  el.classList.add('swap');
+}, SUB_CO_MS);
 
 /* ---------- topic sheet ---------- */
 const myPost = () => state.me && state.posts.find((p) => p.user_id === state.me.id && !p.is_sample);
@@ -2636,6 +2685,14 @@ document.addEventListener('pointermove', (ev) => { if (spFocus.dragging) spSetFo
 document.addEventListener('pointerup', () => { spFocus.dragging = false; });
 
 /* ---------- 관리자: 이메일 구독자 ---------- */
+// 구독 카드에 돌아가며 보일 회사 이름 넣고 빼기
+function subCoAdminHtml() {
+  const list = [...state.subCompanies].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  return `<div class="sub-co-admin"><h3>구독 카드에 보일 회사</h3>
+    <p class="hint">"OO에 다니는 분들도 받아보고 있어요"에 ${(SUB_CO_MS / 1000).toFixed(1)}초마다 하나씩 돌아가며 보여요.</p>
+    <form class="sub-co-form" id="sub-co-form"><input type="text" id="sub-co-name" required maxlength="30" placeholder="회사 이름 (예: 카카오VX)" aria-label="회사 이름"><button class="btn small primary" type="submit">넣기</button></form>
+    ${list.length ? `<ul class="sub-co-list">${list.map((c) => `<li>${esc(c.name)}<button type="button" data-act="del-sub-co" data-id="${c.id}" aria-label="${esc(c.name)} 빼기">✕</button></li>`).join('')}</ul>` : ''}</div>`;
+}
 function renderSubscribers() {
   const el = $('.subscribers');
   if (el) el.outerHTML = subscribersHtml();
@@ -2674,7 +2731,7 @@ function subscribersHtml() {
   else body = `<ul class="sub-list">${list.map((x) => `
       <li><span class="sub-email">${esc(x.email)}</span><time datetime="${esc(x.created_at)}">${fmtDate(kstDate(new Date(x.created_at)))}</time>
         <button class="btn ghost small danger" type="button" data-act="del-subscriber" data-id="${x.id}">삭제</button></li>`).join('')}</ul>`;
-  return `<section class="panel subscribers">${head}${newsletterHtml(s.last)}${body}</section>`;
+  return `<section class="panel subscribers">${head}${newsletterHtml(s.last)}${subCoAdminHtml()}${body}</section>`;
 }
 
 /* ---------- 관리자: 받은 의견 ---------- */
@@ -3216,6 +3273,11 @@ document.addEventListener('click', async (ev) => {
     catch (e) { toast(friendlyError(e)); }
     return;
   }
+  if (act === 'del-sub-co') {
+    try { await api.deleteSubCompany(Number(el.dataset.id)); await loadSubCompanies(); renderSubscribers(); toast('회사를 뺐어요'); }
+    catch (e) { toast(friendlyError(e)); }
+    return;
+  }
   if (act === 'test-mail') {
     state.busy = true; renderSubscribers();
     try { const r = await api.sendTestMail(); toast(`${r.to}(으)로 오늘 문제 메일을 보냈어요`); }
@@ -3432,6 +3494,18 @@ document.addEventListener('submit', async (ev) => {
     }
     return;
   }
+  if (form.id === 'sub-co-form') {
+    ev.preventDefault();
+    const name = $('#sub-co-name').value.trim();
+    if (!name) return;
+    const btn = form.querySelector('button'); btn.disabled = true;
+    try { await api.addSubCompany(name); await loadSubCompanies(); renderSubscribers(); toast(`${name}을(를) 넣었어요`); $('#sub-co-name')?.focus(); }
+    catch (e) {
+      btn.disabled = false;
+      toast(/sub_companies|schema cache|does not exist/i.test((e && e.message) || '') ? '회사용 DB 설정이 아직 없어요. supabase/2026-11-22-sub-companies.sql 을 실행해 주세요.' : friendlyError(e));
+    }
+    return;
+  }
   if (form.id === 'sub-form') {
     ev.preventDefault();
     const email = $('#sub-email').value.trim();
@@ -3510,7 +3584,10 @@ if (topbar) new ResizeObserver(() => document.documentElement.style.setProperty(
     refreshSponsors().then(renderRail);
     updateFeed();
     setInterval(() => { if (document.visibilityState === 'visible') updateFeed(); }, FEED_POLL_MS);
-    if (!noticeClosed) api.subscriberCount().then((n) => { state.subCount = n; renderChrome(); }).catch(() => {});
+    if (!noticeClosed) {
+      api.subscriberCount().then((n) => { state.subCount = n; renderChrome(); }).catch(() => {});
+      loadSubCompanies();
+    }
     const hash = location.hash.replace('#', '');
     if (hash === 'admin' || hash === 'archive') { await refreshTopics(); go(hash); }
     else await openToday();
