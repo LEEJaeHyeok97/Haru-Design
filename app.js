@@ -1343,13 +1343,14 @@ function dgRecord(snap = dgSnapshot()) {
 }
 // 그림을 바꾸는 동작을 감싸서, 실제로 바뀌었을 때만 되돌리기 한 단계로 남긴다
 function dgMutate(fn) {
+  if (dgView.sim) dgSimClose();
   const before = dgSnapshot();
   const out = fn();
   if (dgSnapshot() !== before) dgRecord(before);
   return out;
 }
 function dgStep(from, to) {
-  if (!from.length) return;
+  if (!from.length || dgView.sim) return;
   to.push(dgSnapshot());
   state.diagram = JSON.parse(from.pop());
   dgView.sel = null; dgView.connectFrom = null;
@@ -1450,8 +1451,8 @@ function dgLabelSpots(d) {
   return out;
 }
 
-function dgSvgBody(d, { sel = null, connectFrom = null, forExport = false, fresh = null } = {}) {
-  let s = '', labels = '';
+function dgSvgBody(d, { sel = null, connectFrom = null, forExport = false, fresh = null, sim = null } = {}) {
+  let s = '', labels = '', badges = '';
   const spots = dgLabelSpots(d);
   for (const e of d.edges) {
     const sp = spots.get(e.id);
@@ -1461,7 +1462,8 @@ function dgSvgBody(d, { sel = null, connectFrom = null, forExport = false, fresh
     const color = on ? DG.BLUE : '#4e5968';
     s += `<g class="dg-edge" data-id="${e.id}">`;
     if (!forExport) s += `<path d="${g.path}" fill="none" stroke="transparent" stroke-width="16"/>`;
-    s += `<path d="${g.path}" fill="none" stroke="${color}" stroke-width="${on ? 2.5 : 1.8}" ${e.async ? 'stroke-dasharray="7 5"' : ''} marker-end="url(#${on ? 'dg-arrow-on' : 'dg-arrow'})"/>`;
+    s += `<path d="${g.path}" fill="none" stroke="${sim ? '#b0b8c1' : color}" stroke-width="${on ? 2.5 : 1.8}" ${e.async ? 'stroke-dasharray="7 5"' : ''} marker-end="url(#${on ? 'dg-arrow-on' : 'dg-arrow'})"/>`;
+    if (sim) s += simFlowPath(g, e, sim);
     if (e.label) {
       const lw = dgTextWidth(e.label, 12) + 14;
       labels += `<g class="dg-edge" data-id="${e.id}"><rect x="${sp.x - lw / 2}" y="${sp.y - 11}" width="${lw}" height="22" rx="11" fill="#ffffff" stroke="${on ? DG.BLUE : '#d1d6db'}"/>`;
@@ -1473,22 +1475,26 @@ function dgSvgBody(d, { sel = null, connectFrom = null, forExport = false, fresh
     const t = dgNodeType(n), k = DG_KIND[t.kind], w = dgNodeW(n), h = DG.NODE_H;
     const on = sel && sel.kind === 'node' && sel.id === n.id;
     const from = connectFrom === n.id;
-    const stroke = on || from ? DG.BLUE : k.stroke;
+    const st = sim && simNodeStatus(sim.nodes.get(n.id), n);
+    const stroke = st ? st.color : on || from ? DG.BLUE : k.stroke;
+    const fill = st?.dead ? '#f2f4f6' : k.fill;
     const dash = k.dashed ? 'stroke-dasharray="5 4"' : '';
     s += `<g class="dg-node" data-id="${n.id}" transform="translate(${n.x} ${n.y})">`;
     if (fresh?.has(n.id)) s += `<rect class="dg-ring" x="-5" y="-5" width="${w + (n.dup ? 16 : 10)}" height="${h + (n.dup ? 16 : 10)}" rx="16" fill="none" stroke="${DG.BLUE}" stroke-width="3"/>`;
     if (n.dup) s += `<rect x="6" y="6" width="${w}" height="${h}" rx="12" fill="${k.fill}" stroke="${k.stroke}" stroke-width="1.4" opacity=".7" ${dash}/>`;
-    s += `<rect width="${w}" height="${h}" rx="12" fill="${k.fill}" stroke="${stroke}" stroke-width="${on || from ? 2.5 : 1.6}" ${dash}/>`;
+    s += `<rect width="${w}" height="${h}" rx="12" fill="${fill}" stroke="${stroke}" stroke-width="${on || from || st ? 2.5 : 1.6}" ${dash}/>`;
     s += `<rect x="10" y="${h / 2 - 9}" width="4" height="18" rx="2" fill="${k.chip}"/>`;
     const two = n.label !== t.name;
     const label = dgClip(n.label, w - 30, 14);
     s += `<text x="${w / 2 + 4}" y="${two ? h / 2 - 3 : h / 2 + 5}" text-anchor="middle" font-size="14" font-weight="700" fill="${DG.INK}">${esc(label)}</text>`;
     if (two) s += `<text x="${w / 2 + 4}" y="${h / 2 + 15}" text-anchor="middle" font-size="11" fill="${DG.MUTED}">${esc(t.name)}</text>`;
     if (n.dup) s += `<g transform="translate(${w - 4} -6)"><rect x="-18" y="-1" width="30" height="18" rx="9" fill="${DG.INK}"/><text x="-3" y="12" text-anchor="middle" font-size="11" font-weight="700" fill="#ffffff">×2</text></g>`;
-    if (!forExport) s += `<circle class="dg-port" cx="${w}" cy="${h / 2}" r="7" fill="#ffffff" stroke="${DG.BLUE}" stroke-width="2"/>`;
+    if (st?.dead) s += `<g transform="translate(${w - 14} 14)" stroke="${st.color}" stroke-width="2.4" stroke-linecap="round"><path d="M-5 -5L5 5M5 -5L-5 5"/></g>`;
+    if (!forExport && !sim) s += `<circle class="dg-port" cx="${w}" cy="${h / 2}" r="7" fill="#ffffff" stroke="${DG.BLUE}" stroke-width="2"/>`;
     s += '</g>';
+    if (st?.text) badges += simBadge(n, w, st);
   }
-  return s + labels;
+  return s + labels + badges;
 }
 
 const dgDefs = () => `<defs>
@@ -1526,6 +1532,7 @@ function dgShellHtml({ tabs: withTabs = true } = {}) {
         </div>
       </div>
       <div class="dg-bar" id="dg-bar"></div>
+      <div class="dg-sim" id="dg-sim" hidden></div>
       <div class="dg-foot">
         <p class="dg-legend"><span><b class="ln"></b>동기 호출</span><span><b class="ln dash"></b>비동기</span><span><b class="x2">×2</b>2중화 (같은 역할 두 대)</span></p>
         <div class="dg-history">
@@ -1553,21 +1560,23 @@ function dgRender() {
   if (!svg) return;
   const stage = $('#dg-stage');
   dgSize(svg, Math.max(320, Math.round(stage.clientWidth)));
-  $('#dg-layer').innerHTML = dgSvgBody(state.diagram, { sel: dgView.sel, connectFrom: dgView.connectFrom, fresh: dgView.fresh });
+  $('#dg-layer').innerHTML = dgSvgBody(state.diagram, { sel: dgView.sel, connectFrom: dgView.connectFrom, fresh: dgView.fresh, sim: dgSimView() });
   $('#dg-empty').hidden = state.diagram.nodes.length > 0;
   svg.classList.toggle('connecting', !!dgView.connectFrom);
   if (!dgView.ro) {
     dgView.ro = new ResizeObserver(() => { if ($('#dg-svg')) dgRenderSvg(); });
   }
   dgView.ro.disconnect(); dgView.ro.observe(stage);
+  $('#dg').classList.toggle('simming', !!dgView.sim);
   dgRenderBar();
   dgRenderHistory();
+  dgSimRenderPanel();
 }
 function dgRenderSvg() {
   const stage = $('#dg-stage'), svg = $('#dg-svg');
   if (!stage || !svg) return;
   dgSize(svg, Math.max(320, Math.round(stage.clientWidth)));
-  $('#dg-layer').innerHTML = dgSvgBody(state.diagram, { sel: dgView.sel, connectFrom: dgView.connectFrom, fresh: dgView.fresh });
+  $('#dg-layer').innerHTML = dgSvgBody(state.diagram, { sel: dgView.sel, connectFrom: dgView.connectFrom, fresh: dgView.fresh, sim: dgSimView() });
   $('#dg-empty').hidden = state.diagram.nodes.length > 0;
   svg.classList.toggle('connecting', !!dgView.connectFrom);
   dgRenderHistory();
@@ -1578,6 +1587,7 @@ function dgRenderBar() {
   if (!bar) return;
   const sel = dgView.sel;
   dgView.typing = null;
+  if (dgView.sim) { bar.innerHTML = simBarHtml(); return; }
   if (dgView.connectFrom) {
     bar.innerHTML = `<span class="dg-tip on">연결할 카드를 눌러주세요</span><button class="btn small" type="button" data-dg-act="cancel-connect">취소</button>`;
     return;
@@ -1616,7 +1626,7 @@ function dgRenderBar() {
     return;
   }
   bar.innerHTML = state.diagram.nodes.length
-    ? `<span class="dg-tip">카드를 누르면 이름을 바꾸거나 2중화할 수 있고, 화살표를 누르면 동기/비동기를 고를 수 있어요.</span>${state.diagram.nodes.length > 1 ? '<button class="btn small ghost" type="button" data-dg-act="tidy">자동 정렬</button>' : ''}<button class="btn small ghost" type="button" data-dg-act="clear">전체 지우기</button>`
+    ? `<span class="dg-tip">카드를 누르면 이름을 바꾸거나 2중화할 수 있고, 화살표를 누르면 동기/비동기를 고를 수 있어요.</span>${state.diagram.edges.length ? '<button class="btn small primary" type="button" data-dg-act="sim">▶ 시뮬레이션</button>' : ''}${state.diagram.nodes.length > 1 ? '<button class="btn small ghost" type="button" data-dg-act="tidy">자동 정렬</button>' : ''}<button class="btn small ghost" type="button" data-dg-act="clear">전체 지우기</button>`
     : `<span class="dg-tip">그림 없이 글만 올려도 괜찮아요.</span>`;
 }
 
@@ -1872,7 +1882,7 @@ function dgNodeAt(pt) {
 /* ---------- 입력 ---------- */
 document.addEventListener('pointerdown', (ev) => {
   const svg = ev.target.closest('#dg-svg');
-  if (!svg) return;
+  if (!svg || dgView.sim) return;
   ev.preventDefault();
   // 글 입력칸에 포커스가 남아 있으면 Ctrl+Z 가 글 되돌리기로 가버리므로 풀어준다
   const focused = document.activeElement;
@@ -2018,6 +2028,11 @@ document.addEventListener('click', (ev) => {
       return;
     case 'custom-add': return dgAddCustom();
     case 'custom-cancel': dgView.customOpen = false; dgView.customName = ''; return dgRenderBar();
+    case 'sim': return dgSimOpen();
+    case 'sim-close': dgSimClose(); return dgRender();
+    case 'sim-run': return dgSimStart();
+    case 'sim-scenario': dgView.simScenario = b.dataset.id; return dgSimStart();
+    case 'sim-rate': dgView.simRate = Number(b.dataset.rate); return dgSimStart();
   }
 });
 
@@ -2051,6 +2066,7 @@ document.addEventListener('keydown', (ev) => {
     if (k === 'z') { ev.preventDefault(); return ev.shiftKey ? dgRedo() : dgUndo(); }
     if (k === 'y') { ev.preventDefault(); return dgRedo(); }
   }
+  if (ev.key === 'Escape' && dgView.sim) { ev.stopPropagation(); dgSimClose(); dgRender(); return; }
   if (ev.key === 'Escape' && (dgView.connectFrom || dgView.sel || dgView.customOpen)) {
     // 연결 중이거나 선택된 게 있으면 작성 창을 닫지 않고 그것만 푼다
     ev.stopPropagation(); dgView.connectFrom = null; dgView.sel = null; dgView.customOpen = false; dgRender(); return;
@@ -2063,6 +2079,280 @@ document.addEventListener('keydown', (ev) => {
   if (!dgView.sel) return;
   if (ev.key === 'Delete' || ev.key === 'Backspace') { ev.preventDefault(); dgDeleteSelected(); }
 }, true);
+
+/* =====================================================================
+   시뮬레이션: 캔버스 그림에 1초 단위로 트래픽을 흘려 어디가 느린지, 어디서 실패하는지 본다.
+   수치는 종류별 가정값(SIM_SPEC)이고 대기열 근사로 계산한다.
+   - 사용률이 오르면 지연이 늘고, 처리량을 넘으면 대기열이 쌓이다 2초를 넘기면 타임아웃 실패
+   - 같은 종류끼리는 나눠 받고(로드 밸런싱), 캐시 뒤 DB는 놓친 만큼만, 읽기 복제본은 읽기 몫을 받는다
+   - 비동기 선과 큐 뒤쪽은 응답을 기다리지 않는다. 못 따라가면 실패 대신 밀린 작업으로 쌓인다
+   - 서버는 아래 응답을 기다리는 동안 스레드가 묶여서, 아래가 느려지면 처리량도 준다 (장애 전파)
+   ===================================================================== */
+// cap: 한 대가 1초에 처리하는 요청, lat: 기본 지연(ms), fail: 평소 실패율, hit: 캐시 적중률
+const SIM_SPEC = {
+  client: { cap: Infinity, lat: 0 }, dns: { cap: Infinity, lat: 0 },
+  cdn: { cap: 200000, lat: 5, hit: 0.9 }, lb: { cap: 50000, lat: 1 }, gateway: { cap: 20000, lat: 3 },
+  api: { cap: 1500, lat: 25 }, auth: { cap: 3000, lat: 15 }, ws: { cap: 5000, lat: 5 }, worker: { cap: 800, lat: 40 }, batch: { cap: 300, lat: 80 },
+  redis: { cap: 80000, lat: 1, hit: 0.85 }, cache: { cap: 100000, lat: 2, hit: 0.85 }, local: { cap: Infinity, lat: 0.1, hit: 0.6 },
+  mysql: { cap: 2500, lat: 8 }, sql: { cap: 2500, lat: 8 }, replica: { cap: 2500, lat: 8 }, nosql: { cap: 10000, lat: 5 },
+  blob: { cap: 5000, lat: 40 }, search: { cap: 2000, lat: 25 }, dw: { cap: 100, lat: 800 },
+  kafka: { cap: 200000, lat: 3 }, queue: { cap: 30000, lat: 3 },
+  ext: { cap: 5000, lat: 150, fail: 0.002 }, push: { cap: 5000, lat: 120, fail: 0.002 }, monitor: { cap: 100000, lat: 2 },
+};
+const SIM_KIND_SPEC = { edge: 'lb', compute: 'api', memory: 'redis', store: 'sql', queue: 'queue', external: 'ext' };
+const SIM = { T: 60, FROM: 15, TO: 45, TICK_MS: 100, MAX_WAIT: 2, THREAD_BUDGET: 0.25 };
+const SIM_RATES = [100, 1000, 10000, 100000];
+const simIsDb = (x) => ['mysql', 'sql', 'replica', 'nosql'].includes(x.n.type) || (x.n.type === 'custom' && x.kind === 'store');
+const SIM_SCENARIOS = [
+  { id: 'normal', name: '평소', desc: '평소 트래픽이 꾸준히 들어와요.' },
+  { id: 'spike', name: '트래픽 10배', desc: '15초부터 요청이 10배로 늘었다가 45초에 돌아와요.' },
+  { id: 'cache', name: '캐시 다운', desc: '15~45초 동안 캐시가 멈춰서 요청이 전부 DB로 가요.', target: (m) => m.topo.filter((x) => x.kind === 'memory'), none: '그림에 캐시가 없어요' },
+  { id: 'db', name: 'DB 장애', desc: '15~45초 동안 주 DB 한 대가 멈춰요. ×2면 남은 한 대가 받아요.', target: (m) => m.topo.filter((x) => simIsDb(x) && x.n.type !== 'replica').slice(0, 1), none: '그림에 DB가 없어요' },
+  { id: 'ext', name: '외부 API 장애', desc: '15~45초 동안 외부 API가 2.5초씩 걸리고 30%가 실패해요.', target: (m) => m.topo.filter((x) => x.kind === 'external' && x.n.type !== 'monitor'), none: '그림에 외부 API가 없어요' },
+];
+
+function simModel(d) {
+  const nodes = d.nodes.map((n) => {
+    const t = dgNodeType(n);
+    return { id: n.id, n, kind: t.kind, group: n.type === 'custom' ? `custom:${t.kind}:${n.label}` : n.type, spec: SIM_SPEC[n.type] || SIM_SPEC[SIM_KIND_SPEC[t.kind]], inst: n.dup ? 2 : 1, out: [], qs: 0, qa: 0, D: 0, P: 0, S: 1 };
+  });
+  const by = new Map(nodes.map((x) => [x.id, x]));
+  const hasIn = new Set(d.edges.map((e) => e.to));
+  let sources = nodes.filter((x) => x.n.type === 'client' && d.edges.some((e) => e.from === x.id));
+  if (!sources.length) sources = nodes.filter((x) => !hasIn.has(x.id) && d.edges.some((e) => e.from === x.id));
+  if (!sources.length) sources = nodes.filter((x) => d.edges.some((e) => e.from === x.id)).slice(0, 1);
+  // 출발점에서 깊이 우선으로 돌며 되돌아가는 선(순환)은 뺀다. post: 아래부터, topo: 위부터
+  const post = [], mark = new Map();
+  const visit = (x) => {
+    mark.set(x.id, 1);
+    for (const e of d.edges) {
+      if (e.from !== x.id || !by.has(e.to)) continue;
+      const y = by.get(e.to);
+      if (mark.get(y.id) === 1) continue;
+      x.out.push({ e, to: y, async: !!e.async || x.kind === 'queue' });
+      if (!mark.has(y.id)) visit(y);
+    }
+    mark.set(x.id, 2); post.push(x);
+  };
+  sources.forEach((x) => { if (!mark.has(x.id)) visit(x); });
+  return { nodes, by, sources, post, topo: [...post].reverse() };
+}
+
+// 이 카드에서 나가는 선마다 받는 몫
+function simWeights(x, down) {
+  const groups = new Map();
+  for (const o of x.out) groups.set(o.to.group, (groups.get(o.to.group) || 0) + 1);
+  const pass = x.spec.hit != null ? (down.has(x.id) ? 1 : 1 - x.spec.hit) : 1;
+  let dbShare = 1;
+  for (const o of x.out) if (o.to.kind === 'memory') dbShare *= down.has(o.to.id) ? 1 : 1 - (o.to.spec.hit ?? 0);
+  const replica = x.out.some((o) => o.to.n.type === 'replica') && x.out.some((o) => simIsDb(o.to) && o.to.n.type !== 'replica');
+  return x.out.map((o) => {
+    let w = pass / groups.get(o.to.group);
+    if (simIsDb(o.to) && x.kind !== 'memory') {
+      w *= dbShare;
+      if (replica) w *= o.to.n.type === 'replica' ? 0.7 : 0.3;
+    }
+    return w;
+  });
+}
+
+function simTick(m, sc, base, t) {
+  const mult = sc.id === 'spike' ? (t < SIM.FROM ? 1 : t < SIM.FROM + 5 ? 1 + 9 * (t - SIM.FROM) / 5 : t < SIM.TO ? 10 : 1) : 1;
+  const on = t >= SIM.FROM && t < SIM.TO;
+  const down = new Set(on && sc.target ? sc.target(m).map((x) => x.id) : []);
+  const rate = base * mult, edges = new Map(), nodes = new Map();
+  for (const x of m.nodes) { x.s = 0; x.a = 0; }
+  for (const x of m.sources) x.s += rate / m.sources.length;
+  for (const x of m.topo) {
+    const sp = x.spec, hit = down.has(x.id);
+    const slow = hit && x.kind === 'external';
+    const bypass = hit && x.kind === 'memory';
+    const dead = hit && !slow && !bypass && x.inst === 1;
+    const lat = slow ? 2500 : sp.lat, fail = slow ? 0.3 : sp.fail || 0;
+    let mu = sp.cap * (hit && !slow && !bypass ? x.inst - 1 : x.inst);
+    // 아래 응답을 기다리는 동안 스레드가 묶인다: 동시 처리 한도 / (자기 시간 + 아래 시간)
+    if (x.kind === 'compute' && Number.isFinite(mu) && mu > 0) mu = Math.min(mu, sp.cap * x.inst * SIM.THREAD_BUDGET / ((lat + x.D) / 1000));
+    let ps, pa, drop = 0;
+    const offered = x.s + x.a;
+    if (bypass) { ps = x.s; pa = x.a; x.qs = 0; x.qa = 0; }
+    else if (dead) { ps = 0; pa = 0; drop = x.s + x.qs; x.qs = 0; x.qa += x.a; }
+    else {
+      ps = Math.min(x.s + x.qs, mu); x.qs = x.s + x.qs - ps;
+      if (x.qs > mu * SIM.MAX_WAIT) { drop = x.qs - mu * SIM.MAX_WAIT; x.qs = mu * SIM.MAX_WAIT; }
+      pa = Math.min(x.a + x.qa, mu - ps); x.qa = x.a + x.qa - pa;
+    }
+    const finite = Number.isFinite(mu) && mu > 0;
+    const rho = finite ? Math.min(0.95, (ps + pa) / mu) : 0;
+    x.err = dead ? 1 : x.s > 0 ? Math.min(1, (drop + ps * fail) / x.s) : 0;
+    x.mean = bypass ? 0 : lat / (1 - rho) + (finite ? x.qs / mu * 1000 : 0);
+    x.p99 = bypass ? 0 : lat * 1.5 + (x.mean - lat) * 4.6;
+    x.w = simWeights(x, down);
+    x.out.forEach((o, i) => {
+      const w = x.w[i], s = o.async ? 0 : ps * w, a = o.async ? (ps + pa) * w : pa * w;
+      o.to.s += s; o.to.a += a; edges.set(o.e.id, s + a);
+    });
+    nodes.set(x.id, { x, rps: ps + pa, offered, sync: x.s, util: finite ? offered / mu : dead && offered ? Infinity : 0, p99: x.p99, err: x.err, fails: drop + ps * fail, backlog: x.qa, lag: finite ? x.qa / mu : 0, dead, bypass, slow, half: hit && !slow && !bypass && !dead, client: x.n.type === 'client' });
+  }
+  // 아래부터 올라오며 응답 시간(D, P)과 성공 확률(S)을 모은다
+  for (const x of m.post) {
+    let D = 0, P = 0, S = 1 - x.err;
+    x.out.forEach((o, i) => {
+      if (o.async) return;
+      const w = Math.min(1, x.w[i]), c = o.to;
+      D += w * (c.mean + c.D); P += w * (c.p99 + c.P); S *= 1 - w * (1 - c.S);
+    });
+    x.D = D; x.P = P; x.S = S;
+  }
+  const avg = (f) => m.sources.reduce((s, x) => s + f(x), 0) / m.sources.length;
+  return { t, rate, success: avg((x) => x.S), p99: avg((x) => x.p99 + x.P), nodes, edges, down };
+}
+
+// 한 대뿐이라 멈추면 요청이 같이 실패하는 곳 (캐시는 건너뛸 수 있어서 뺀다)
+function simSpofs(m) {
+  return m.topo.filter((x) => x.inst === 1 && !['client', 'dns', 'monitor'].includes(x.n.type) && x.kind !== 'memory'
+    && !m.topo.some((y) => y !== x && y.group === x.group && m.topo.some((p) => p.out.some((o) => o.to === x) && p.out.some((o) => o.to === y))));
+}
+
+/* ---------- 화면 ---------- */
+const simFmtRate = (v) => (v >= 1e4 ? `${(v / 1e4).toFixed(v >= 1e5 ? 0 : 1).replace(/\.0$/, '')}만` : v >= 1e3 ? `${(v / 1e3).toFixed(1).replace(/\.0$/, '')}천` : `${Math.round(v)}`);
+const simFmtMs = (v) => (v >= 1000 ? `${(v / 1000).toFixed(1).replace(/\.0$/, '')}초` : `${v < 10 ? v.toFixed(1).replace(/\.0$/, '') : Math.round(v)}ms`);
+const simFmtPct = (v) => `${v >= 0.1 ? Math.round(v * 100) : (v * 100).toFixed(1).replace(/\.0$/, '')}%`;
+const SIM_COLOR = { ok: '#03b26c', warn: '#fe9800', bad: '#f04452', dead: '#8b95a1', none: '#8b95a1' };
+
+function simNodeStatus(r, n) {
+  if (!r) return { color: '#d1d6db', text: '' };
+  if (r.client) return { color: '#4e5968', tone: 'none', text: `${simFmtRate(r.rps)}/초 보냄` };
+  if (r.dead) return { color: SIM_COLOR.bad, tone: 'bad', dead: true, text: '멈춤 · 요청 실패' };
+  if (r.bypass) return { color: SIM_COLOR.dead, tone: 'none', dead: true, text: '멈춤 · 건너뜀' };
+  if (!r.offered && !r.backlog) return { color: '#d1d6db', tone: 'none', text: '' };
+  const tone = r.err >= 0.05 || (r.util >= 1 && r.sync > 0) || r.lag >= 10 ? 'bad' : r.half || r.err >= 0.005 || r.util >= 0.7 || r.lag >= 1 ? 'warn' : 'ok';
+  let text = r.sync > 0 ? `${simFmtRate(r.rps)}/초 · ${simFmtMs(r.p99)}` : `${simFmtRate(r.rps)}/초 처리`;
+  if (r.err >= 0.001) text += ` · 실패 ${simFmtPct(r.err)}`;
+  if (r.lag >= 1) text += ` · ${simFmtRate(r.backlog)}건 밀림`;
+  if (r.half) text = `1대 멈춤 · ${text}`;
+  return { color: SIM_COLOR[tone], tone, text };
+}
+function simBadge(n, w, st) {
+  const bw = dgTextWidth(st.text, 11) + 16, y = n.y + DG.NODE_H + (n.dup ? 10 : 4);
+  const bg = { ok: '#e8f8f0', warn: '#fff3e0', bad: '#ffeeee', none: '#f2f4f6' }[st.tone], ink = { ok: '#03965a', warn: '#c25a00', bad: '#e0323f', none: '#4e5968' }[st.tone];
+  return `<g class="dg-badge" transform="translate(${n.x + w / 2 - bw / 2} ${y})"><rect width="${bw}" height="20" rx="10" fill="${bg}" stroke="#ffffff" stroke-width="2"/><text x="${bw / 2}" y="14" text-anchor="middle" font-size="11" font-weight="700" fill="${ink}">${esc(st.text)}</text></g>`;
+}
+// 트래픽이 흐르는 선 위에 움직이는 점. 많을수록 굵게, 받는 쪽이 실패 중이면 빨갛게
+function simFlowPath(g, e, sim) {
+  const v = sim.edges.get(e.id) || 0;
+  if (v < 0.5) return '';
+  const r = sim.nodes.get(e.to), bad = r && (r.err >= 0.05 || r.dead);
+  const width = 2.5 + 4 * Math.min(1, Math.log10(1 + v) / Math.log10(1 + sim.maxEdge));
+  const delay = -((performance.now() % 800) / 1000);
+  return `<path class="dg-flow" d="${g.path}" fill="none" stroke="${bad ? SIM_COLOR.bad : DG.BLUE}" stroke-width="${width.toFixed(1)}" style="animation-delay:${delay}s"/>`;
+}
+
+function simBarHtml() {
+  const v = dgView.sim, m = v.model;
+  return `<div class="seg" role="group" aria-label="문제 상황">${SIM_SCENARIOS.map((sc) => {
+    const off = sc.target && !sc.target(m).length;
+    return `<button type="button" data-dg-act="sim-scenario" data-id="${sc.id}" aria-pressed="${v.scenario.id === sc.id}" ${off ? `disabled title="${sc.none}"` : ''}>${sc.name}</button>`;
+  }).join('')}</div>
+    <div class="seg" role="group" aria-label="평소 트래픽">${SIM_RATES.map((r) => `<button type="button" data-dg-act="sim-rate" data-rate="${r}" aria-pressed="${v.rate === r}">${simFmtRate(r)}/초</button>`).join('')}</div>
+    <span class="dg-tip"></span>
+    <button class="btn small" type="button" data-dg-act="sim-run">${v.timer ? '처음부터' : '다시 실행'}</button>
+    <button class="btn small ghost" type="button" data-dg-act="sim-close">편집으로 돌아가기</button>`;
+}
+
+function simSummary(v) {
+  const acc = v.acc, m = v.model, done = !v.timer;
+  const last = v.last;
+  const stat = (label, val, tone) => `<div class="dg-sim-stat"><span>${label}</span><b class="mono ${tone || ''}">${val}</b></div>`;
+  const success = acc.total ? 1 - acc.failed / acc.total : 1;
+  const tone = (s) => (s >= 0.999 ? 'ok' : s >= 0.99 ? 'warn' : 'bad');
+  const event = v.scenario.id !== 'normal' && last && last.t >= SIM.FROM && last.t < SIM.TO ? `<span class="chip future">${v.scenario.name} 중</span>` : '';
+  let html = `<div class="dg-sim-head"><p>${v.scenario.desc} <span class="sub">수치는 종류별 가정값이에요.</span></p>
+    <div class="dg-sim-prog" aria-hidden="true"><i style="width:${((last ? last.t + 1 : 0) / SIM.T) * 100}%"></i></div>
+    <p class="dg-sim-time"><span class="mono">${last ? last.t + 1 : 0}초 / ${SIM.T}초</span>${event}${done && v.worst ? `<span>그림은 가장 나빴던 ${v.worst.t + 1}초 모습이에요</span>` : ''}</p></div>`;
+  html += `<div class="dg-sim-stats">
+    ${done ? stat('성공률', simFmtPct2(success), tone(success)) : stat('지금 성공률', simFmtPct2(last?.success ?? 1), tone(last?.success ?? 1))}
+    ${done ? stat('가장 느릴 때 응답 p99', simFmtMs(acc.maxP99), acc.maxP99 > 1000 ? 'bad' : acc.maxP99 > 300 ? 'warn' : 'ok') : stat('지금 응답 p99', simFmtMs(last?.p99 ?? 0))}
+    ${done ? stat('실패한 요청', `${fmtNum(Math.round(acc.failed))}건`, acc.failed >= 1 ? 'bad' : 'ok') : stat('지금 들어오는 요청', `${simFmtRate(last?.rate ?? 0)}/초`)}
+  </div>`;
+  if (!done) return html;
+  const ns = [...acc.nodes.values()].filter((a) => !a.client);
+  const name = (a) => esc(a.x.n.label);
+  const list = (title, items) => (items.length ? `<div class="dg-sim-list"><h4>${title}</h4><ul>${items.join('')}</ul></div>` : '');
+  const slow = ns.filter((a) => a.peakP99 >= 100 || a.peakUtil >= 0.7).sort((a, b) => b.peakP99 + b.peakUtil - (a.peakP99 + a.peakUtil)).slice(0, 3)
+    .map((a) => `<li><b>${name(a)}</b><span>p99 최대 ${simFmtMs(a.peakP99)} · 사용률 최대 ${a.peakUtil === Infinity ? '—' : simFmtPct(a.peakUtil)}</span></li>`);
+  const failing = ns.filter((a) => a.fails >= 1).sort((a, b) => b.fails - a.fails).slice(0, 4)
+    .map((a) => `<li><b>${name(a)}</b><span>${fmtNum(Math.round(a.fails))}건 실패 (${simFmtPct(a.fails / Math.max(1, a.reqs))})${a.deadTicks ? ` · ${a.deadTicks}초 멈춤` : ''}</span></li>`);
+  const backlog = ns.filter((a) => a.maxLag >= 1).sort((a, b) => b.maxLag - a.maxLag).slice(0, 3)
+    .map((a) => `<li><b>${name(a)}</b><span>최대 ${simFmtRate(a.maxBacklog)}건 밀림 (따라잡는 데 약 ${simFmtMs(a.maxLag * 1000)})</span></li>`);
+  const spofs = simSpofs(m).map((x) => `<li><b>${esc(x.n.label)}</b><span>한 대뿐이라 멈추면 이 길의 요청이 실패해요</span></li>`);
+  const TIP = { store: '앞에 캐시를 두거나 읽기 복제본으로 나눠 보세요.', compute: '×2로 늘리거나, 기다릴 필요 없는 일은 큐로 빼 보세요.', external: '비동기로 바꾸거나 타임아웃과 서킷 브레이커를 두세요.', edge: '×2로 늘려 보세요.', memory: '×2로 늘리거나 키를 나눠 보세요.', queue: '소비자(워커)를 늘려 보세요.', consumer: '워커를 ×2로 늘리거나 한 번에 여러 건씩 처리해 보세요.' };
+  const tips = [];
+  for (const a of ns.filter((a) => a.peakUtil >= 1 || a.fails >= 1).sort((a, b) => b.fails - a.fails || b.peakUtil - a.peakUtil).slice(0, 3)) {
+    tips.push(`<li><b>${name(a)}</b><span>${!a.reqs ? `작업이 밀려요. ${TIP.consumer}` : `${a.peakUtil >= 1 ? '처리량을 넘었어요. ' : '요청이 실패했어요. '}${TIP[a.x.kind] || TIP.compute}`}</span></li>`);
+  }
+  html += `<div class="dg-sim-lists">${list('느린 곳', slow)}${list('실패한 곳', failing)}${list('밀린 작업', backlog)}${list('단일 장애 지점', spofs)}${list('이렇게 고쳐 볼 수 있어요', tips)}</div>`;
+  if (!failing.length && !backlog.length && success >= 0.999) html += `<p class="dg-sim-ok">이 상황에서는 문제없이 버텼어요. 트래픽을 올리거나 다른 상황도 돌려 보세요.</p>`;
+  return html;
+}
+const simFmtPct2 = (v) => `${(Math.floor(v * 1000) / 10).toFixed(1).replace(/\.0$/, '')}%`;
+
+function dgSimRenderPanel() {
+  const el = $('#dg-sim');
+  if (!el) return;
+  el.hidden = !dgView.sim;
+  if (dgView.sim) el.innerHTML = simSummary(dgView.sim);
+}
+
+function dgSimOpen() {
+  const m = simModel(state.diagram);
+  if (!m.sources.length) return;
+  dgView.sel = null; dgView.connectFrom = null; dgView.customOpen = false;
+  dgView.sim = { model: m, scenario: SIM_SCENARIOS[0], rate: dgView.simRate || 1000 };
+  dgSimStart();
+}
+function dgSimStart() {
+  const v = dgView.sim;
+  if (!v) return;
+  clearInterval(v.timer);
+  v.model = simModel(state.diagram);
+  const sc = SIM_SCENARIOS.find((x) => x.id === dgView.simScenario) || SIM_SCENARIOS[0];
+  v.scenario = sc.target && !sc.target(v.model).length ? SIM_SCENARIOS[0] : sc;
+  v.rate = dgView.simRate || v.rate;
+  v.acc = { total: 0, failed: 0, maxP99: 0, nodes: new Map() };
+  v.last = null; v.worst = null; v.t = 0;
+  v.timer = setInterval(dgSimStep, SIM.TICK_MS);
+  dgSimStep();
+  dgRender();
+}
+function dgSimStep() {
+  const v = dgView.sim;
+  if (!v) return;
+  if (!$('#dg-svg')) { clearInterval(v.timer); dgView.sim = null; return; }
+  const r = simTick(v.model, v.scenario, v.rate, v.t);
+  r.maxEdge = Math.max(1, ...r.edges.values());
+  const acc = v.acc;
+  acc.total += r.rate; acc.failed += r.rate * (1 - r.success); acc.maxP99 = Math.max(acc.maxP99, r.p99);
+  for (const [id, n] of r.nodes) {
+    const a = acc.nodes.get(id) || { x: n.x, client: n.client, peakP99: 0, peakUtil: 0, fails: 0, reqs: 0, maxBacklog: 0, maxLag: 0, deadTicks: 0 };
+    if (n.sync > 0 && !n.dead && !n.bypass) a.peakP99 = Math.max(a.peakP99, n.p99);
+    if (n.offered > 0) a.peakUtil = Math.max(a.peakUtil, n.util);
+    a.fails += n.fails; a.reqs += n.sync; a.maxBacklog = Math.max(a.maxBacklog, n.backlog); a.maxLag = Math.max(a.maxLag, n.lag);
+    if (n.dead) a.deadTicks++;
+    acc.nodes.set(id, a);
+  }
+  v.last = r; v.t++;
+  const score = (x) => x.success - Math.min(1, x.p99 / 10000) * 0.01;
+  if (!v.worst || score(r) < score(v.worst)) v.worst = r;
+  if (v.t >= SIM.T) { clearInterval(v.timer); v.timer = null; dgRenderBar(); }
+  dgRenderSvg();
+  dgSimRenderPanel();
+}
+// 실행 중에는 지금 모습, 끝나면 가장 나빴던 순간을 그림에 보여 준다
+const dgSimView = () => (dgView.sim ? (dgView.sim.timer ? dgView.sim.last : dgView.sim.worst || dgView.sim.last) : null);
+function dgSimClose() {
+  if (dgView.sim) clearInterval(dgView.sim.timer);
+  dgView.sim = null;
+}
 
 /* ---------- PNG로 내보내기 ---------- */
 function dgExportSvg(d) {
