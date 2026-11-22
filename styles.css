@@ -786,3 +786,40 @@ a.sponsor:hover { box-shadow: var(--shadow-lg); transform: translateY(-1px); }
 .dg-sim-list li span { font-size: var(--text-xs); color: var(--muted); line-height: 1.5; }
 .dg-sim-ok { margin: 0; font-size: var(--text-sm); color: var(--ok); font-weight: 600; }
 @media (max-width: 560px) { .dg-sim-stats { grid-template-columns: 1fr; } }
+.dg-sim-tune:empty { display: none; }
+.dg-sim-hint { margin: 0; font-size: var(--text-xs); color: var(--muted); }
+.dg-sim-tune { display: grid; gap: 10px; }
+.dg-sim-tune-head { display: flex; align-items: center; gap: 4px 8px; flex-wrap: wrap; font-size: var(--text-sm); }
+.dg-sim-tune-head span { font-size: var(--text-xs); color: var(--muted); margin-right: auto; }
+.dg-sim-fields { display: flex; gap: 8px; flex-wrap: wrap; }
+.dg-sim-field { display: grid; gap: 4px; font-size: var(--text-xs); color: var(--muted); flex: 1 1 150px; }
+.dg-sim-field small { color: var(--faint); font-size: .6875rem; }
+.dg-sim-input { display: flex; align-items: center; gap: 6px; background: var(--surface); border-radius: 10px; padding: 0 10px; box-shadow: inset 0 0 0 1px var(--line); }
+.dg-sim-input:focus-within { box-shadow: inset 0 0 0 2px var(--marker); }
+.dg-sim-input input { border: 0; background: none; padding: 8px 0; width: 100%; min-width: 0; font-size: var(--text-sm); box-shadow: none; }
+.dg-sim-input input:focus { box-shadow: none; outline: none; }
+.dg-sim-input em { font-style: normal; white-space: nowrap; color: var(--faint); }
+.sim-charts { position: relative; display: grid; gap: 10px; background: var(--surface); border-radius: 12px; padding: 12px 14px; box-shadow: var(--shadow); cursor: crosshair; }
+.sim-chart { display: grid; gap: 4px; }
+.sim-chart-head { display: flex; justify-content: space-between; font-size: var(--text-xs); color: var(--muted); }
+.sim-chart-head b { color: var(--ink); font-size: var(--text-sm); }
+.sim-plot { position: relative; height: 56px; }
+.sim-plot svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.sim-y { position: absolute; left: 0; font-size: .6875rem; color: var(--faint); background: rgba(255, 255, 255, .8); padding: 0 3px; border-radius: 4px; pointer-events: none; }
+.sim-y.top { top: -2px; }
+.sim-y.bot { bottom: 1px; }
+.sim-x { display: flex; justify-content: space-between; font-size: .6875rem; color: var(--faint); }
+.sim-tip { position: absolute; top: 4px; transform: translateX(-50%); background: var(--ink); color: #fff; font-size: var(--text-xs); padding: 6px 10px; border-radius: 8px; white-space: nowrap; pointer-events: none; box-shadow: var(--shadow-lg); }
+.sim-tip b { margin-right: 6px; }
+.sim-band-note { margin: 0; display: flex; align-items: center; gap: 6px; font-size: .6875rem; color: var(--muted); }
+.sim-band-note i { width: 14px; height: 10px; background: #eef0f3; border-radius: 2px; box-shadow: inset 0 0 0 1px #d1d6db; }
+.sim-open { margin: 8px 20px 0; }
+.modal.sim-modal { width: min(880px, 100%); max-height: calc(100dvh - 32px); overflow-y: auto; padding: 20px; gap: 12px; }
+.sim-modal-head { display: flex; align-items: center; gap: 8px; }
+.sim-modal-head h2 { margin-right: auto; }
+.sim-modal .ai-fig-note { margin: 0; }
+.sim-stage { border-radius: 16px; background: var(--sheet); box-shadow: inset 0 0 0 1px var(--line); padding: 8px; }
+#sim-svg { display: block; width: 100%; height: auto; max-height: 52vh; }
+#sim-svg .dg-node { cursor: pointer; }
+#sim-svg .dg-flow { stroke-dasharray: 0 16; stroke-linecap: round; pointer-events: none; opacity: .85; animation: dg-flow .8s linear infinite; }
+@media (prefers-reduced-motion: reduce) { #sim-svg .dg-flow { animation: none; stroke-dasharray: none; opacity: .35; } }

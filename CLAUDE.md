@@ -14,7 +14,7 @@
 
 ## 백엔드
 
-- Supabase 프로젝트 `kqgxhfdwngmxyrkceprm`. 테이블: `topics`, `posts`, `likes`, `comments`(`parent_id`로 대댓글 한 단계), `profiles`, `events`(이용 기록, insert만 공개), `subscribers`(이메일 구독, insert만 공개·select/delete는 `is_admin()`), `sponsors`(스폰서 광고, `active`인 것만 공개), `newsletter_sends`(문제 메일 발송 기록, select는 `is_admin()`), `feedback`(상단 '개발자 혼내러가기' 의견, insert만 공개·select/delete는 `is_admin()`), `sub_companies`(구독 카드에 돌아가며 보일 회사 이름, 읽기 공개·insert/delete는 `is_admin()`).  `events.type` 최신 목록은 `supabase/2026-11-03-mail-click.sql`에 있다. RPC `is_admin`, `subscriber_count`(누구나, 숫자만), `admin_metrics(days)`, `admin_timeline(hours)`. Storage 버킷 `designs`.
+- Supabase 프로젝트 `kqgxhfdwngmxyrkceprm`. 테이블: `topics`, `posts`, `likes`, `comments`(`parent_id`로 대댓글 한 단계), `profiles`, `events`(이용 기록, insert만 공개), `subscribers`(이메일 구독, insert만 공개·select/delete는 `is_admin()`), `sponsors`(스폰서 광고, `active`인 것만 공개), `newsletter_sends`(문제 메일 발송 기록, select는 `is_admin()`), `feedback`(상단 '개발자 혼내러가기' 의견, insert만 공개·select/delete는 `is_admin()`), `sub_companies`(구독 카드에 돌아가며 보일 회사 이름, 읽기 공개·insert/delete는 `is_admin()`).  `events.type` 최신 목록은 `supabase/2026-11-22-simulate.sql`에 있다. `posts.diagram`은 캔버스로 그려 올린 글의 그림 데이터(`{nodes, edges}`, 카드별 시뮬레이션 가정값 `n.sim` 포함)로, 컬럼이 없으면 `createPost`가 빼고 다시 올린다. RPC `is_admin`, `subscriber_count`(누구나, 숫자만), `admin_metrics(days)`, `admin_timeline(hours)`. Storage 버킷 `designs`.
 - 새 사용자 동작을 지표에 넣으려면 `track(type, path)`를 부르고, `events.type` check 제약(SQL)과 `ENDPOINTS` 라벨(app.js)을 같이 늘린다. 요청 모니터링 그래프에도 보이려면 `TL_SERIES`에 색과 함께 추가한다.
 - 스키마 SQL은 레포에 없다. DB 변경은 `supabase/날짜-이름.sql`로 만들고 사용자에게 SQL Editor에서 실행해 달라고 한다 (Claude가 직접 실행할 수 없음). 컬럼이 아직 없어도 깨지지 않게 조회는 `select('*')` 쪽을 선호.
 - 읽기 확인은 anon key로 REST 조회 가능: `curl "$URL/rest/v1/comments?select=*&limit=1" -H "apikey: $KEY"`. 운영 DB에 쓰기 요청은 보내지 말 것.
@@ -22,6 +22,7 @@
 - `api/newsletter.js`: Vercel Cron(`0 0 * * *` UTC = 오전 9시 KST)이 GET으로 불러 오늘 문제를 구독자에게 Gmail SMTP(`node:tls`로 직접, 의존성 없음)로 보낸다. `newsletter_sends`에 먼저 넣은 요청만 보낸다. POST는 관리자 테스트 발송, `?preview`는 미리 보기. 구독 취소 서명은 `api/unsubscribe.js`와 같은 HMAC(service_role 키). 메일 속 사이트 링크는 `mailLink()`로 `?from=mail&d=날짜`를 붙이고, 프런트 `MAIL_REF`가 boot 때 `track('mail_click', 날짜)` 후 주소에서 지운다.
 - `api/interview.js`: 글쓰기의 'AI와 대화하며 쓰기'. 대화 기록과 지금 캔버스 그림(`{nodes, edges}`, 좌표 없이)을 받아 Claude(effort low)가 다음 질문·답 후보(`choices`)·전체 그림(`col/row` 격자)을 준다. `{ finish: true }`면 대화를 템플릿 글로 정리. 저장 없음, Supabase 토큰 확인. 프런트는 `dgApplyAi()`로 기존 카드 자리는 두고 새 카드만 놓으며(`dgMutate`로 감쌈), 정리한 글은 `state.draft`로 옮겨 직접 쓰기 화면에서 올린다. 서버의 `TYPES`는 `DG_TYPES`와 맞춰 둘 것.
 - `api/review.js`: Supabase 토큰 확인 후 Claude(`claude-opus-5-5`, effort medium, json_schema 구조화 출력, `fallbacks: "default"`)로 평가. 키는 Vercel 환경 변수 `ANTHROPIC_API_KEY`. `{ postId }`로 부르면 올라온 글을 채점해 `posts.ai_score`/`ai_review`에 저장한다 (`api/diagram.js`와 같은 pending 선점 방식, service_role 키 필요). 프런트는 `aiJob()` 큐(`aiDraw`, `aiScore`)로 부른다.
+- 설계 시뮬레이션은 서버 없이 `app.js`에서만 계산한다 (`SIM_SPEC` 가정값 → `simModel` → `simTick` 1초씩). 한 번에 하나(`dgView.sim`)이며 `host`가 `canvas`(글쓰기 캔버스)거나 `post`(올라온 글을 띄운 창, `openSimPost`). 실행은 `track('simulate', host)`.
 
 ## 확인 방법
 

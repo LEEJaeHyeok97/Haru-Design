@@ -182,20 +182,27 @@ async function createSupabaseApi(onAuthChange) {
       }
       return rows.map((r) => ({
         id: r.id, user_id: r.user_id, content: r.content, image_path: r.image_path, image_url: publicUrl(r.image_path), is_sample: !!r.is_sample,
-        ai_diagram: r.ai_diagram || null, ai_diagram_status: r.ai_diagram_status || null,
+        ai_diagram: r.ai_diagram || null, ai_diagram_status: r.ai_diagram_status || null, diagram: r.diagram || null,
         ai_score: r.ai_score ?? null, ai_review: r.ai_review || null, ai_review_status: r.ai_review_status || null,
         created_at: r.created_at, author: r.author || { id: r.user_id, nickname: '알 수 없음' },
         like_count: r.likes?.[0]?.count ?? 0, comment_count: r.comments?.[0]?.count ?? 0, liked: liked.has(r.id),
       }));
     },
-    async createPost(topicId, content, file) {
+    async createPost(topicId, content, file, diagram = null) {
       let image_path = null;
       if (file) {
         const { blob, ext } = await prepareImage(file);
         image_path = `${uid()}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
         must(await sb.storage.from(CONFIG.BUCKET).upload(image_path, blob, { contentType: blob.type || file.type, upsert: false }));
       }
-      const { error } = await sb.from('posts').insert({ topic_id: topicId, content, image_path });
+      const row = { topic_id: topicId, content, image_path };
+      if (diagram) row.diagram = diagram;
+      let { error } = await sb.from('posts').insert(row);
+      // diagram 컬럼을 아직 만들지 않은 DB(또는 크기 제한에 걸림)면 그림 데이터 없이 다시 올린다
+      if (error && diagram && (error.code === 'PGRST204' || /diagram/.test(error.message || ''))) {
+        delete row.diagram;
+        ({ error } = await sb.from('posts').insert(row));
+      }
       if (error) {
         if (image_path) await sb.storage.from(CONFIG.BUCKET).remove([image_path]);
         throw error;
@@ -662,12 +669,12 @@ function createDemoApi() {
         liked: !!db.me && db.likes.some((l) => l.post_id === p.id && l.user_id === db.me),
       })).sort((a, b) => b.created_at.localeCompare(a.created_at));
     },
-    async createPost(topicId, content, file) {
+    async createPost(topicId, content, file, diagram = null) {
       const me = need();
       if (db.posts.some((p) => p.topic_id === topicId && p.user_id === me)) throw Object.assign(new Error('dup'), { code: '23505', message: 'post' });
       let image_url = null;
       if (file) { const { blob } = await prepareImage(file, { max: 1200, forceCompress: true }); image_url = await blobToDataURL(blob); }
-      db.posts.push({ id: nextId(), topic_id: topicId, user_id: me, content, image_url, created_at: new Date().toISOString() });
+      db.posts.push({ id: nextId(), topic_id: topicId, user_id: me, content, image_url, diagram, created_at: new Date().toISOString() });
       save();
     },
     async deletePost(post) {
@@ -1343,14 +1350,14 @@ function dgRecord(snap = dgSnapshot()) {
 }
 // 그림을 바꾸는 동작을 감싸서, 실제로 바뀌었을 때만 되돌리기 한 단계로 남긴다
 function dgMutate(fn) {
-  if (dgView.sim) dgSimClose();
+  if (dgView.sim?.host === 'canvas') dgSimClose();
   const before = dgSnapshot();
   const out = fn();
   if (dgSnapshot() !== before) dgRecord(before);
   return out;
 }
 function dgStep(from, to) {
-  if (!from.length || dgView.sim) return;
+  if (!from.length || dgView.sim?.host === 'canvas') return;
   to.push(dgSnapshot());
   state.diagram = JSON.parse(from.pop());
   dgView.sel = null; dgView.connectFrom = null;
@@ -1480,6 +1487,7 @@ function dgSvgBody(d, { sel = null, connectFrom = null, forExport = false, fresh
     const fill = st?.dead ? '#f2f4f6' : k.fill;
     const dash = k.dashed ? 'stroke-dasharray="5 4"' : '';
     s += `<g class="dg-node" data-id="${n.id}" transform="translate(${n.x} ${n.y})">`;
+    if (st && on) s += `<rect x="-5" y="-5" width="${w + (n.dup ? 16 : 10)}" height="${h + (n.dup ? 16 : 10)}" rx="16" fill="none" stroke="${DG.BLUE}" stroke-width="2.5"/>`;
     if (fresh?.has(n.id)) s += `<rect class="dg-ring" x="-5" y="-5" width="${w + (n.dup ? 16 : 10)}" height="${h + (n.dup ? 16 : 10)}" rx="16" fill="none" stroke="${DG.BLUE}" stroke-width="3"/>`;
     if (n.dup) s += `<rect x="6" y="6" width="${w}" height="${h}" rx="12" fill="${k.fill}" stroke="${k.stroke}" stroke-width="1.4" opacity=".7" ${dash}/>`;
     s += `<rect width="${w}" height="${h}" rx="12" fill="${fill}" stroke="${stroke}" stroke-width="${on || from || st ? 2.5 : 1.6}" ${dash}/>`;
@@ -1560,14 +1568,14 @@ function dgRender() {
   if (!svg) return;
   const stage = $('#dg-stage');
   dgSize(svg, Math.max(320, Math.round(stage.clientWidth)));
-  $('#dg-layer').innerHTML = dgSvgBody(state.diagram, { sel: dgView.sel, connectFrom: dgView.connectFrom, fresh: dgView.fresh, sim: dgSimView() });
+  $('#dg-layer').innerHTML = dgSvgBody(state.diagram, { sel: dgView.sim?.host === 'canvas' ? simSel(dgView.sim) : dgView.sel, connectFrom: dgView.connectFrom, fresh: dgView.fresh, sim: dgSimView() });
   $('#dg-empty').hidden = state.diagram.nodes.length > 0;
   svg.classList.toggle('connecting', !!dgView.connectFrom);
   if (!dgView.ro) {
     dgView.ro = new ResizeObserver(() => { if ($('#dg-svg')) dgRenderSvg(); });
   }
   dgView.ro.disconnect(); dgView.ro.observe(stage);
-  $('#dg').classList.toggle('simming', !!dgView.sim);
+  $('#dg').classList.toggle('simming', dgView.sim?.host === 'canvas');
   dgRenderBar();
   dgRenderHistory();
   dgSimRenderPanel();
@@ -1576,7 +1584,7 @@ function dgRenderSvg() {
   const stage = $('#dg-stage'), svg = $('#dg-svg');
   if (!stage || !svg) return;
   dgSize(svg, Math.max(320, Math.round(stage.clientWidth)));
-  $('#dg-layer').innerHTML = dgSvgBody(state.diagram, { sel: dgView.sel, connectFrom: dgView.connectFrom, fresh: dgView.fresh, sim: dgSimView() });
+  $('#dg-layer').innerHTML = dgSvgBody(state.diagram, { sel: dgView.sim?.host === 'canvas' ? simSel(dgView.sim) : dgView.sel, connectFrom: dgView.connectFrom, fresh: dgView.fresh, sim: dgSimView() });
   $('#dg-empty').hidden = state.diagram.nodes.length > 0;
   svg.classList.toggle('connecting', !!dgView.connectFrom);
   dgRenderHistory();
@@ -1587,7 +1595,7 @@ function dgRenderBar() {
   if (!bar) return;
   const sel = dgView.sel;
   dgView.typing = null;
-  if (dgView.sim) { bar.innerHTML = simBarHtml(); return; }
+  if (dgView.sim?.host === 'canvas') { bar.innerHTML = simBarHtml(); return; }
   if (dgView.connectFrom) {
     bar.innerHTML = `<span class="dg-tip on">연결할 카드를 눌러주세요</span><button class="btn small" type="button" data-dg-act="cancel-connect">취소</button>`;
     return;
@@ -1882,7 +1890,9 @@ function dgNodeAt(pt) {
 /* ---------- 입력 ---------- */
 document.addEventListener('pointerdown', (ev) => {
   const svg = ev.target.closest('#dg-svg');
-  if (!svg || dgView.sim) return;
+  if (!svg) return;
+  // 시뮬레이션 중에는 편집 대신, 누른 카드의 가정값을 바꾸는 칸을 연다
+  if (dgView.sim?.host === 'canvas') { const nd = ev.target.closest('.dg-node'); if (nd) simTuneOpen(nd.dataset.id); return; }
   ev.preventDefault();
   // 글 입력칸에 포커스가 남아 있으면 Ctrl+Z 가 글 되돌리기로 가버리므로 풀어준다
   const focused = document.activeElement;
@@ -1975,6 +1985,8 @@ document.addEventListener('click', (ev) => {
     dgView.sel = { kind: 'node', id: n.id }; dgView.customOpen = false;
     return dgRender();
   }
+  const simNode = ev.target.closest('#sim-svg .dg-node');
+  if (simNode) return simTuneOpen(simNode.dataset.id);
   const b = ev.target.closest('[data-dg-act]');
   if (!b) return;
   const act = b.dataset.dgAct, d = state.diagram, sel = dgView.sel;
@@ -2033,6 +2045,12 @@ document.addEventListener('click', (ev) => {
     case 'sim-run': return dgSimStart();
     case 'sim-scenario': dgView.simScenario = b.dataset.id; return dgSimStart();
     case 'sim-rate': dgView.simRate = Number(b.dataset.rate); return dgSimStart();
+    case 'sim-tune-close': if (dgView.sim) { dgView.sim.tune = null; simRenderTune(); simPaint(dgView.sim); } return;
+    case 'sim-tune-reset': {
+      const v = dgView.sim, n = v?.tune && simD(v).nodes.find((x) => x.id === v.tune);
+      if (n) { delete n.sim; simRenderTune(); dgSimStart({ silent: true }); }
+      return;
+    }
   }
 });
 
@@ -2066,7 +2084,7 @@ document.addEventListener('keydown', (ev) => {
     if (k === 'z') { ev.preventDefault(); return ev.shiftKey ? dgRedo() : dgUndo(); }
     if (k === 'y') { ev.preventDefault(); return dgRedo(); }
   }
-  if (ev.key === 'Escape' && dgView.sim) { ev.stopPropagation(); dgSimClose(); dgRender(); return; }
+  if (ev.key === 'Escape' && dgView.sim?.host === 'canvas') { ev.stopPropagation(); dgSimClose(); dgRender(); return; }
   if (ev.key === 'Escape' && (dgView.connectFrom || dgView.sel || dgView.customOpen)) {
     // 연결 중이거나 선택된 게 있으면 작성 창을 닫지 않고 그것만 푼다
     ev.stopPropagation(); dgView.connectFrom = null; dgView.sel = null; dgView.customOpen = false; dgRender(); return;
@@ -2114,7 +2132,7 @@ const SIM_SCENARIOS = [
 function simModel(d) {
   const nodes = d.nodes.map((n) => {
     const t = dgNodeType(n);
-    return { id: n.id, n, kind: t.kind, group: n.type === 'custom' ? `custom:${t.kind}:${n.label}` : n.type, spec: SIM_SPEC[n.type] || SIM_SPEC[SIM_KIND_SPEC[t.kind]], inst: n.dup ? 2 : 1, out: [], qs: 0, qa: 0, D: 0, P: 0, S: 1 };
+    return { id: n.id, n, kind: t.kind, group: n.type === 'custom' ? `custom:${t.kind}:${n.label}` : n.type, spec: simSpecOf(n), inst: n.dup ? 2 : 1, out: [], qs: 0, qa: 0, D: 0, P: 0, S: 1 };
   });
   const by = new Map(nodes.map((x) => [x.id, x]));
   const hasIn = new Set(d.edges.map((e) => e.to));
@@ -2256,7 +2274,100 @@ function simBarHtml() {
     <div class="seg" role="group" aria-label="평소 트래픽">${SIM_RATES.map((r) => `<button type="button" data-dg-act="sim-rate" data-rate="${r}" aria-pressed="${v.rate === r}">${simFmtRate(r)}/초</button>`).join('')}</div>
     <span class="dg-tip"></span>
     <button class="btn small" type="button" data-dg-act="sim-run">${v.timer ? '처음부터' : '다시 실행'}</button>
-    <button class="btn small ghost" type="button" data-dg-act="sim-close">편집으로 돌아가기</button>`;
+    ${v.host === 'canvas' ? '<button class="btn small ghost" type="button" data-dg-act="sim-close">편집으로 돌아가기</button>' : ''}`;
+}
+
+/* ---------- 카드별 가정값 바꾸기 ----------
+   바꾼 값은 카드의 n.sim 에 둔다. 내 캔버스에서는 글과 함께 저장되고, 남의 글에서는 이 화면에서만 바뀐다. */
+const SIM_TUNE = [
+  { key: 'cap', label: '처리량', unit: '/초 · 한 대', min: 1, max: 1e7, show: (b) => Number.isFinite(b.cap) },
+  { key: 'lat', label: '기본 지연', unit: 'ms', min: 0, max: 60000, show: () => true },
+  { key: 'hit', label: '캐시 적중률', unit: '%', min: 0, max: 99, pct: true, show: (b) => b.hit != null },
+];
+const simBaseSpec = (n) => SIM_SPEC[n.type] || SIM_SPEC[SIM_KIND_SPEC[dgNodeType(n).kind]];
+const simSpecOf = (n) => ({ ...simBaseSpec(n), ...(n.sim || {}) });
+// 저장된 값이나 남의 글에서 온 값은 범위 안의 숫자만 받는다
+function simCleanTune(o) {
+  if (!o || typeof o !== 'object') return undefined;
+  const out = {};
+  for (const f of SIM_TUNE) {
+    const v = Number(o[f.key]);
+    if (o[f.key] != null && Number.isFinite(v)) out[f.key] = Math.min(f.pct ? f.max / 100 : f.max, Math.max(f.min, v));
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+function simTuneHtml(v) {
+  const n = v.tune && simD(v).nodes.find((x) => x.id === v.tune);
+  if (!n) return '<p class="dg-sim-hint">카드를 누르면 그 카드의 처리량과 지연을 바꿔서 다시 돌려 볼 수 있어요.</p>';
+  if (n.type === 'client') return `<div class="dg-sim-tune-head"><b>${esc(n.label)}</b><span>요청을 보내는 쪽이에요. 트래픽은 위에서 골라요.</span><button class="btn small ghost" type="button" data-dg-act="sim-tune-close">닫기</button></div>`;
+  const base = simBaseSpec(n), cur = simSpecOf(n);
+  const fields = SIM_TUNE.filter((f) => f.show(base)).map((f) => {
+    const val = f.pct ? Math.round(cur[f.key] * 100) : cur[f.key];
+    const def = f.pct ? Math.round(base[f.key] * 100) : base[f.key];
+    return `<label class="dg-sim-field"><span>${f.label} <small>기본 ${fmtNum(def)}</small></span><span class="dg-sim-input"><input type="number" inputmode="decimal" data-sim-tune="${f.key}" min="${f.min}" max="${f.max}" value="${val}"><em>${f.unit}</em></span></label>`;
+  }).join('');
+  return `<div class="dg-sim-tune-head"><b>${esc(n.label)}</b><span>가정값 · ${v.host === 'canvas' ? '글을 올리면 같이 저장돼요' : '이 화면에서만 바뀌어요'}</span>
+      ${n.sim ? '<button class="btn small ghost" type="button" data-dg-act="sim-tune-reset">기본값으로</button>' : ''}<button class="btn small ghost" type="button" data-dg-act="sim-tune-close">닫기</button></div>
+    <div class="dg-sim-fields">${fields}</div>`;
+}
+function simTuneSet(key, raw) {
+  const v = dgView.sim, n = v?.tune && simD(v).nodes.find((x) => x.id === v.tune);
+  const f = SIM_TUNE.find((x) => x.key === key);
+  if (!n || !f || raw === '' || !Number.isFinite(Number(raw))) return;
+  const val = Math.min(f.max, Math.max(f.min, Number(raw))) / (f.pct ? 100 : 1);
+  const next = { ...(n.sim || {}), [key]: val };
+  if (val === simBaseSpec(n)[key]) delete next[key];
+  if (Object.keys(next).length) n.sim = next; else delete n.sim;
+  simRenderTune();
+  dgSimStart({ silent: true });
+}
+function simTuneOpen(id) {
+  const v = dgView.sim;
+  if (!v) return;
+  v.tune = v.tune === id ? null : id;
+  simRenderTune();
+  simPaint(v);
+  $('[data-sim-tune]')?.focus();
+}
+function simRenderTune() {
+  const el = $(simHost().tune);
+  if (el && dgView.sim) el.innerHTML = simTuneHtml(dgView.sim);
+}
+
+/* ---------- 시간 그래프: 요청 · 성공률 · p99 를 같은 시간축의 작은 그래프 셋으로 ---------- */
+function simChartsHtml(v) {
+  const s = v.series;
+  if (!s.length) return '';
+  const W = 600, H = 56, x = (t) => (t / (SIM.T - 1)) * W;
+  const at = v.hoverT != null && s[v.hoverT] ? s[v.hoverT] : s[s.length - 1];
+  const band = v.scenario.id !== 'normal' ? `<rect x="${x(SIM.FROM)}" y="0" width="${x(SIM.TO) - x(SIM.FROM)}" height="${H}" fill="#eef0f3"/>` : '';
+  const cross = v.hoverT != null ? `<line x1="${x(at.t)}" x2="${x(at.t)}" y1="0" y2="${H}" stroke="#8b95a1" stroke-width="1" vector-effect="non-scaling-stroke"/>` : '';
+  const minS = Math.min(...s.map((p) => p.success));
+  const sLo = minS >= 0.99 ? 0.98 : minS >= 0.9 ? 0.9 : minS >= 0.5 ? 0.5 : 0;
+  const charts = [
+    { name: '들어온 요청', get: (p) => p.rate, lo: 0, hi: niceMax(Math.max(...s.map((p) => p.rate)) * 1.2), fmt: (v) => `${simFmtRate(v)}/초` },
+    { name: '성공률', get: (p) => p.success, lo: sLo, hi: 1, fmt: simFmtPct2 },
+    { name: '응답 p99', get: (p) => p.p99, lo: 0, hi: niceMax(Math.max(1, ...s.map((p) => p.p99)) * 1.2), fmt: simFmtMs },
+  ];
+  const plot = (c) => {
+    const y = (p) => H - ((Math.max(c.lo, Math.min(c.hi, c.get(p))) - c.lo) / (c.hi - c.lo || 1)) * (H - 2) - 1;
+    const pts = s.map((p) => `${x(p.t).toFixed(1)},${y(p).toFixed(1)}`).join(' ');
+    return `<div class="sim-chart">
+      <div class="sim-chart-head"><span>${c.name}</span><b class="mono">${c.fmt(c.get(at))}</b></div>
+      <div class="sim-plot"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">${band}
+        <line x1="0" x2="${W}" y1="${H - 0.5}" y2="${H - 0.5}" stroke="#d1d6db" stroke-width="1" vector-effect="non-scaling-stroke"/>
+        <polyline points="${pts}" fill="none" stroke="${DG.BLUE}" stroke-width="2" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>${cross}</svg>
+        <span class="sim-y top mono">${c.fmt(c.hi)}</span><span class="sim-y bot mono">${c.fmt(c.lo)}</span></div></div>`;
+  };
+  const tip = v.hoverT != null ? `<div class="sim-tip" style="left:${Math.min(80, Math.max(20, (at.t / (SIM.T - 1)) * 100))}%"><b>${at.t + 1}초</b> 요청 ${simFmtRate(at.rate)}/초 · 성공 ${simFmtPct2(at.success)} · p99 ${simFmtMs(at.p99)}</div>` : '';
+  const sum = `${SIM.T}초 동안 요청 최대 ${simFmtRate(Math.max(...s.map((p) => p.rate)))}/초, 성공률 최저 ${simFmtPct2(minS)}, p99 최대 ${simFmtMs(Math.max(...s.map((p) => p.p99)))}`;
+  return `<div class="sim-charts" role="img" aria-label="${sum}">${charts.map(plot).join('')}
+    <div class="sim-x mono" aria-hidden="true"><span>0초</span><span>${SIM.T / 2}초</span><span>${SIM.T}초</span></div>${tip}
+    ${band ? `<p class="sim-band-note"><i></i>${v.scenario.name} 구간 (${SIM.FROM}~${SIM.TO}초)</p>` : ''}</div>`;
+}
+function simRenderCharts() {
+  const el = $('#sim-charts-wrap');
+  if (el && dgView.sim) el.innerHTML = simChartsHtml(dgView.sim);
 }
 
 function simSummary(v) {
@@ -2296,38 +2407,65 @@ function simSummary(v) {
 }
 const simFmtPct2 = (v) => `${(Math.floor(v * 1000) / 10).toFixed(1).replace(/\.0$/, '')}%`;
 
+/* ---------- 실행 ----------
+   시뮬레이션은 한 번에 하나(dgView.sim). host 'canvas' 는 글쓰기 캔버스, 'post' 는 올라온 글을 띄운 창이다. */
+const SIM_HOSTS = {
+  canvas: { svg: '#dg-svg', bar: '#dg-bar', panel: '#dg-sim', tune: '#dg-sim-tune' },
+  post: { svg: '#sim-svg', bar: '#sim-bar', panel: '#sim-panel', tune: '#dg-sim-tune' },
+};
+const simHost = (v = dgView.sim) => SIM_HOSTS[v?.host || 'canvas'];
+const simD = (v) => (v.host === 'canvas' ? state.diagram : v.d);
+// 실행 중에는 지금 모습, 끝나면 가장 나빴던 순간을 그림에 보여 준다
+const simViewOf = (v) => (v.timer ? v.last : v.worst || v.last);
+const dgSimView = () => (dgView.sim?.host === 'canvas' ? simViewOf(dgView.sim) : null);
+const simSel = (v) => (v.tune ? { kind: 'node', id: v.tune } : null);
+
+function simPaint(v) {
+  if (v.host === 'canvas') return dgRenderSvg();
+  const layer = $('#sim-layer');
+  if (layer) layer.innerHTML = dgSvgBody(v.d, { forExport: true, sel: simSel(v), sim: simViewOf(v) });
+}
 function dgSimRenderPanel() {
-  const el = $('#dg-sim');
+  const v = dgView.sim, el = $(simHost(v).panel);
   if (!el) return;
-  el.hidden = !dgView.sim;
-  if (dgView.sim) el.innerHTML = simSummary(dgView.sim);
+  if (v?.host === 'canvas' || v?.host === 'post') {
+    el.hidden = false;
+    if (!$('#dg-sim-body', el)) {
+      el.innerHTML = `<div class="dg-sim-tune" id="dg-sim-tune"></div><div id="dg-sim-body"></div><div id="sim-charts-wrap"></div>`;
+      simRenderTune();
+    }
+    $('#dg-sim-body', el).innerHTML = simSummary(v);
+    simRenderCharts();
+  } else { el.hidden = true; el.innerHTML = ''; }
 }
 
 function dgSimOpen() {
-  const m = simModel(state.diagram);
-  if (!m.sources.length) return;
+  if (dgView.sim) dgSimClose();
+  if (!simModel(state.diagram).sources.length) return;
   dgView.sel = null; dgView.connectFrom = null; dgView.customOpen = false;
-  dgView.sim = { model: m, scenario: SIM_SCENARIOS[0], rate: dgView.simRate || 1000 };
+  dgView.sim = { host: 'canvas', scenario: SIM_SCENARIOS[0], rate: dgView.simRate || 1000, tune: null };
   dgSimStart();
 }
-function dgSimStart() {
+function dgSimStart({ silent = false } = {}) {
   const v = dgView.sim;
   if (!v) return;
   clearInterval(v.timer);
-  v.model = simModel(state.diagram);
+  v.model = simModel(simD(v));
   const sc = SIM_SCENARIOS.find((x) => x.id === dgView.simScenario) || SIM_SCENARIOS[0];
   v.scenario = sc.target && !sc.target(v.model).length ? SIM_SCENARIOS[0] : sc;
   v.rate = dgView.simRate || v.rate;
   v.acc = { total: 0, failed: 0, maxP99: 0, nodes: new Map() };
-  v.last = null; v.worst = null; v.t = 0;
+  v.last = null; v.worst = null; v.t = 0; v.series = []; v.hoverT = null;
   v.timer = setInterval(dgSimStep, SIM.TICK_MS);
+  if (!silent) track('simulate', v.host);
   dgSimStep();
-  dgRender();
+  if (v.host === 'canvas') dgRender();
+  else { const bar = $('#sim-bar'); if (bar) bar.innerHTML = simBarHtml(); }
 }
 function dgSimStep() {
   const v = dgView.sim;
   if (!v) return;
-  if (!$('#dg-svg')) { clearInterval(v.timer); dgView.sim = null; return; }
+  if (!$(simHost(v).svg)) { clearInterval(v.timer); dgView.sim = null; return; }
   const r = simTick(v.model, v.scenario, v.rate, v.t);
   r.maxEdge = Math.max(1, ...r.edges.values());
   const acc = v.acc;
@@ -2340,19 +2478,68 @@ function dgSimStep() {
     if (n.dead) a.deadTicks++;
     acc.nodes.set(id, a);
   }
+  v.series.push({ t: r.t, rate: r.rate, success: r.success, p99: r.p99 });
   v.last = r; v.t++;
   const score = (x) => x.success - Math.min(1, x.p99 / 10000) * 0.01;
   if (!v.worst || score(r) < score(v.worst)) v.worst = r;
-  if (v.t >= SIM.T) { clearInterval(v.timer); v.timer = null; dgRenderBar(); }
-  dgRenderSvg();
+  if (v.t >= SIM.T) {
+    clearInterval(v.timer); v.timer = null;
+    if (v.host === 'canvas') dgRenderBar(); else $('#sim-bar').innerHTML = simBarHtml();
+  }
+  simPaint(v);
   dgSimRenderPanel();
 }
-// 실행 중에는 지금 모습, 끝나면 가장 나빴던 순간을 그림에 보여 준다
-const dgSimView = () => (dgView.sim ? (dgView.sim.timer ? dgView.sim.last : dgView.sim.worst || dgView.sim.last) : null);
 function dgSimClose() {
   if (dgView.sim) clearInterval(dgView.sim.timer);
   dgView.sim = null;
 }
+
+/* ---------- 올라온 글의 설계 돌려 보기 ---------- */
+// 캔버스로 그려 올린 글은 그림 데이터(posts.diagram), 글만 올린 글은 AI 가 그린 그림(ai_diagram)을 쓴다
+function simDiagramOf(p) {
+  for (const [raw, ai] of [[p.diagram, false], [p.ai_diagram, true]]) {
+    const d = raw && dgNormalize(raw);
+    if (d && d.edges.length) return { d, ai };
+  }
+  return null;
+}
+function openSimPost(p) {
+  const found = simDiagramOf(p);
+  if (!found) return;
+  if (dgView.sim) { const wasCanvas = dgView.sim.host === 'canvas'; dgSimClose(); if (wasCanvas && $('#dg-svg')) dgRender(); }
+  const { d, ai } = found;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const n of d.nodes) { x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y); x1 = Math.max(x1, n.x + dgNodeW(n) + 12); y1 = Math.max(y1, n.y + DG.NODE_H + 34); }
+  const pad = 24, w = Math.max(320, x1 - x0 + pad * 2), h = y1 - y0 + pad * 2;
+  const pw = 120; // 카드 아래 배지가 카드보다 넓어 양옆으로 넘칠 수 있어 여유를 둔다
+  $('#layer').innerHTML = `<div class="overlay" data-act="close-layer">
+    <div class="modal sim-modal" role="dialog" aria-modal="true" aria-labelledby="sim-title">
+      <div class="sim-modal-head"><h2 id="sim-title">${esc(p.author.nickname)}님 설계 시뮬레이션</h2><button class="btn ghost small" type="button" data-act="close-layer" aria-label="닫기">닫기</button></div>
+      ${ai ? '<p class="ai-fig-note"><span class="chip ai">AI</span>글을 읽고 AI가 그린 그림으로 돌려요. 실제 설계와 다를 수 있어요.</p>' : ''}
+      <div class="sim-stage"><svg id="sim-svg" viewBox="${x0 - pad - pw / 2} ${y0 - pad} ${w + pw} ${h}" role="img" aria-label="시뮬레이션 중인 설계 다이어그램" xmlns="http://www.w3.org/2000/svg" font-family='${DG_FONT}'>${dgDefs()}<g id="sim-layer"></g></svg></div>
+      <div class="dg-bar" id="sim-bar"></div>
+      <div class="dg-sim" id="sim-panel"></div>
+    </div></div>`;
+  dgView.sim = { host: 'post', d, postId: p.id, scenario: SIM_SCENARIOS[0], rate: dgView.simRate || 1000, tune: null };
+  dgSimStart();
+}
+
+// 시간 그래프 위에서 움직이면 그 초의 값을 보여 준다
+document.addEventListener('pointermove', (ev) => {
+  const v = dgView.sim;
+  if (!v?.series?.length) return;
+  const plot = ev.target.closest?.('.sim-charts') && $('.sim-plot', ev.target.closest('.sim-charts'));
+  let t = null;
+  if (plot) {
+    const r = plot.getBoundingClientRect();
+    t = Math.max(0, Math.min(v.series.length - 1, Math.round(((ev.clientX - r.left) / r.width) * (SIM.T - 1))));
+  }
+  if (t !== v.hoverT) { v.hoverT = t; simRenderCharts(); }
+});
+document.addEventListener('change', (ev) => {
+  const el = ev.target.closest?.('[data-sim-tune]');
+  if (el) simTuneSet(el.dataset.simTune, el.value);
+});
 
 /* ---------- PNG로 내보내기 ---------- */
 function dgExportSvg(d) {
@@ -2404,21 +2591,32 @@ state.diagram = dgNew();
 const aiSvgCache = new WeakMap();
 function aiDiagramUrl(raw) {
   if (aiSvgCache.has(raw)) return aiSvgCache.get(raw);
-  let url = null;
+  const { nodes, edges } = dgNormalize(raw);
+  const url = nodes.length ? 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(dgExportSvg({ nodes, edges }).svg) : null;
+  if (raw && typeof raw === 'object') aiSvgCache.set(raw, url);
+  return url;
+}
+// 저장된 그림(AI 그림·올린 캔버스)을 믿지 않고 캔버스 형식으로 다시 만든다
+function dgNormalize(raw) {
   const ids = new Map();
   const nodes = (Array.isArray(raw?.nodes) ? raw.nodes : []).slice(0, 20).map((n, i) => {
     ids.set(n.id, 'n' + i);
     const x = { id: 'n' + i, type: DG_TYPES.some((t) => t.type === n.type) ? n.type : 'custom', label: String(n.label ?? '').slice(0, 30), x: Number(n.x) || 0, y: Number(n.y) || 0, dup: !!n.dup };
     if (x.type === 'custom') x.kind = DG_KIND[n.kind] ? n.kind : 'compute';
+    const tune = simCleanTune(n.sim);
+    if (tune) x.sim = tune;
     return x;
   });
   const edges = (Array.isArray(raw?.edges) ? raw.edges : []).slice(0, 30)
     .map((e, i) => ({ id: 'e' + i, from: ids.get(e.from), to: ids.get(e.to), async: !!e.async, label: String(e.label ?? '').slice(0, 30) }))
     .filter((e) => e.from && e.to);
-  if (nodes.length) url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(dgExportSvg({ nodes, edges }).svg);
-  if (raw && typeof raw === 'object') aiSvgCache.set(raw, url);
-  return url;
+  return { nodes, edges };
 }
+// 글과 함께 저장할 캔버스 그림 (다른 사람도 시뮬레이션해 볼 수 있게)
+const dgSaveShape = (d) => ({
+  nodes: d.nodes.map((n) => ({ id: n.id, type: n.type, ...(n.type === 'custom' ? { kind: n.kind } : {}), label: n.label, x: Math.round(n.x), y: Math.round(n.y), dup: !!n.dup, ...(n.sim ? { sim: n.sim } : {}) })),
+  edges: d.edges.map((e) => ({ id: e.id, from: e.from, to: e.to, async: !!e.async, label: e.label || '' })),
+});
 
 /* ---------- posts ---------- */
 function contentHtml(text) {
@@ -2514,11 +2712,13 @@ function commentsHtml(p) {
 
 // 그림 자리: 직접 올린 그림 > AI 가 그린 그림 > 그리는 중 표시
 function postFigHtml(p) {
-  if (p.image_url) return `<div class="post-fig"><button class="post-img" type="button" data-act="zoom" data-src="${esc(p.image_url)}" aria-label="다이어그램 크게 보기"><img src="${esc(p.image_url)}" alt="${esc(p.author.nickname)}님의 설계 다이어그램" loading="lazy"></button></div>`;
+  // 그림 데이터가 있으면 이 설계를 바로 돌려 볼 수 있다
+  const sim = simDiagramOf(p) ? `<button class="btn small sim-open" type="button" data-act="sim-post" data-id="${p.id}">▶ 이 설계 시뮬레이션</button>` : '';
+  if (p.image_url) return `<div class="post-fig"><button class="post-img" type="button" data-act="zoom" data-src="${esc(p.image_url)}" aria-label="다이어그램 크게 보기"><img src="${esc(p.image_url)}" alt="${esc(p.author.nickname)}님의 설계 다이어그램" loading="lazy"></button>${p.diagram ? sim : ''}</div>`;
   const ai = p.ai_diagram && aiDiagramUrl(p.ai_diagram);
   if (ai) {
     return `<div class="post-fig"><button class="post-img" type="button" data-act="zoom" data-src="${esc(ai)}" aria-label="AI가 그린 다이어그램 크게 보기"><img src="${esc(ai)}" alt="AI가 글을 보고 그린 설계 다이어그램"></button>
-      <p class="ai-fig-note"><span class="chip ai">AI</span>글을 읽고 AI가 그린 그림이에요. 실제 설계와 다를 수 있어요.</p></div>`;
+      <p class="ai-fig-note"><span class="chip ai">AI</span>글을 읽고 AI가 그린 그림이에요. 실제 설계와 다를 수 있어요.</p>${sim}</div>`;
   }
   if (isDrawing(p)) return `<div class="post-fig"><div class="ai-fig-wait" role="status"><span class="spinner" aria-hidden="true"></span>AI가 글을 읽고 아키텍처를 그리고 있어요</div></div>`;
   return '<div class="post-fig"></div>';
@@ -2638,6 +2838,8 @@ const ENDPOINTS = {
   'feedback suggest': ['POST', '의견 · 건의'],
   'feedback question': ['POST', '의견 · 문의'],
   'feedback improve': ['POST', '의견 · 개선'],
+  'simulate canvas': ['GET', '시뮬레이션 · 내 설계'],
+  'simulate post': ['GET', '시뮬레이션 · 올라온 설계'],
 };
 const fmtNum = (n) => Number(n || 0).toLocaleString('ko-KR');
 const fmtSec = (ms) => (ms == null ? '-' : `${(ms / 1000).toFixed(1)}초`);
@@ -3073,6 +3275,7 @@ const TL_SERIES = [
   ['subscribe', '이메일 구독', '#008300'],
   ['sponsor_click', '스폰서 클릭', '#6250d6'],
   ['feedback', '의견 남기기', '#7a5c3d'],
+  ['simulate', '시뮬레이션', '#b5179e'],
 ];
 const TL_RANGES = [[24, '24시간'], [168, '7일'], [720, '30일']];
 const kstParts = (ms) => Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(ms)).map((p) => [p.type, p.value]));
@@ -3596,6 +3799,7 @@ document.addEventListener('click', async (ev) => {
   if (act === 'cancel-compose' || (act === 'backdrop-compose' && ev.target === el)) { if (state.busy) return; state.composing = false; return render(); }
   if (act === 'backdrop-compose') return;
   if (act === 'zoom') return openLightbox(el.dataset.src);
+  if (act === 'sim-post') { const p = state.posts.find((x) => String(x.id) === el.dataset.id); if (p) openSimPost(p); return; }
   if (act === 'toggle-score') {
     const id = Number(el.dataset.id) || el.dataset.id;
     if (!state.openScores.delete(id)) state.openScores.add(id);
@@ -3717,8 +3921,9 @@ document.addEventListener('submit', async (ev) => {
     state.busy = true; state.draft = content; render();
     try {
       if (!state.me) { await api.ensureUser(nickname); await refreshMe(); }
-      const file = state.dgMode === 'image' ? state.draftFile : await dgExportPng();
-      await api.createPost(state.topicId, content, file);
+      const canvas = state.dgMode !== 'image' && state.diagram.nodes.length;
+      const file = canvas ? await dgExportPng() : state.dgMode === 'image' ? state.draftFile : null;
+      await api.createPost(state.topicId, content, file, canvas ? dgSaveShape(state.diagram) : null);
       track('post_create');
       updateFeed();
       if (state.draftPreview?.startsWith('blob:')) URL.revokeObjectURL(state.draftPreview);
